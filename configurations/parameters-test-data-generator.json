@@ -1,0 +1,34 @@
+[
+  {
+    "ParameterKey": "ProjectName",
+    "ParameterValue": "ndjson-parquet"
+  },
+  {
+    "ParameterKey": "InputBucketName",
+    "ParameterValue": "ndjson-input-804450520964"
+  },
+  {
+    "ParameterKey": "LambdaCodeS3Bucket",
+    "ParameterValue": "ndjson-parquet-sqs-logs-804450520964"
+  },
+  {
+    "ParameterKey": "LambdaCodeS3Key",
+    "ParameterValue": "lambda/test-data-generator.zip"
+  },
+  {
+    "ParameterKey": "TargetFileSizeMB",
+    "ParameterValue": "3.5"
+  },
+  {
+    "ParameterKey": "FilesPerInvocation",
+    "ParameterValue": "10"
+  },
+  {
+    "ParameterKey": "LambdaTimeout",
+    "ParameterValue": "300"
+  },
+  {
+    "ParameterKey": "LambdaMemorySize",
+    "ParameterValue": "512"
+  }
+]

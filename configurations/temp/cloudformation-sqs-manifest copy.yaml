@@ -1,0 +1,344 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'SQS + Manifest + Glue Streaming NDJSON to Parquet Pipeline (v1.1.0 - Updated with code review fixes)'
+
+# Version 1.1.0 Changes:
+# - Added DeletionPolicy and UpdateReplacePolicy to S3 buckets
+# - Added configurable file validation environment variables
+# - Added lock TTL configuration
+# - Enhanced alarms and monitoring
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: ndjson-parquet-sqs
+    Description: Project name for resource naming
+  
+  InputBucketName:
+    Type: String
+    Description: S3 bucket for incoming NDJSON files
+    Default: ndjson-input-sqs
+  
+  ManifestBucketName:
+    Type: String
+    Description: S3 bucket for manifest files
+    Default: ndjson-manifests
+  
+  OutputBucketName:
+    Type: String
+    Description: S3 bucket for output Parquet files
+    Default: parquet-output-sqs
+  
+  QuarantineBucketName:
+    Type: String
+    Description: S3 bucket for quarantined files
+    Default: ndjson-quarantine
+  
+  MaxBatchSizeGB:
+    Type: Number
+    Default: 1.0
+    Description: Maximum manifest batch size in GB
+  
+  ExpectedFileSizeMB:
+    Type: Number
+    Default: 3.5
+    Description: Expected NDJSON file size in MB
+  
+  SizeTolerancePercent:
+    Type: Number
+    Default: 10
+    Description: Allowed variance in file size (percent)
+  
+  GlueWorkerType:
+    Type: String
+    Default: G.2X
+    AllowedValues: [G.1X, G.2X, G.4X, G.8X]
+    Description: Glue worker type
+  
+  GlueNumberOfWorkers:
+    Type: Number
+    Default: 10
+    Description: Number of Glue workers for streaming job
+  
+  AlertEmail:
+    Type: String
+    Description: Email address for alerts
+    Default: magzine323@gmail.com
+
+Resources:
+  # ==================== S3 
+
+  # ==================== SNS TOPICS ====================
+  
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ProjectName}-alerts'
+      DisplayName: Pipeline Alerts
+      Subscription:
+        - Endpoint: !Ref AlertEmail
+          Protocol: email
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ==================== CLOUDWATCH DASHBOARDS ====================
+  
+  PipelineDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub '${ProjectName}-pipeline'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  ["AWS/SQS", "NumberOfMessagesSent", "QueueName", "${FileEventQueue.QueueName}", {"stat": "Sum", "label": "Messages Received"}],
+                  [".", "ApproximateNumberOfMessagesVisible", ".", ".", {"stat": "Average", "label": "Queue Depth"}]
+                ],
+                "period": 300,
+                "region": "${AWS::Region}",
+                "title": "SQS Queue Metrics",
+                "yAxis": {"left": {"min": 0}}
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", "${FileEventDLQ.QueueName}", {"stat": "Sum", "label": "DLQ Messages", "color": "#d62728"}]
+                ],
+                "period": 300,
+                "region": "${AWS::Region}",
+                "title": "Dead Letter Queue",
+                "yAxis": {"left": {"min": 0}}
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  ["AWS/Lambda", "Invocations", "FunctionName", "${ManifestBuilderFunction}", {"stat": "Sum", "label": "Manifest Builder"}],
+                  [".", "Errors", ".", ".", {"stat": "Sum", "label": "Errors", "color": "#d62728"}],
+                  [".", "Duration", ".", ".", {"stat": "Average", "label": "Avg Duration"}]
+                ],
+                "period": 300,
+                "region": "${AWS::Region}",
+                "title": "Lambda Metrics"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  ["NDJSONPipeline", "JobRuns", "JobName", "${GlueStreamingJob}", "State", "SUCCEEDED", {"stat": "Sum", "label": "Succeeded"}],
+                  ["...", "FAILED", {"stat": "Sum", "label": "Failed", "color": "#d62728"}],
+                  [".", "JobExecutionTime", ".", ".", ".", "SUCCEEDED", {"stat": "Average", "label": "Avg Execution Time"}]
+                ],
+                "period": 300,
+                "region": "${AWS::Region}",
+                "title": "Glue Job Metrics"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 12,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  ["NDJSONPipeline", "DPUSeconds", "JobName", "${GlueStreamingJob}", {"stat": "Sum", "label": "DPU Seconds"}],
+                  [".", "EstimatedCostUSD", ".", ".", {"stat": "Sum", "label": "Estimated Cost ($)"}]
+                ],
+                "period": 3600,
+                "region": "${AWS::Region}",
+                "title": "Cost Metrics (Hourly)"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 12,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  ["GlueStreaming", "BatchProcessingTime", "JobName", "ndjson-parquet-streaming", {"stat": "Average", "label": "Avg Batch Time"}],
+                  [".", "BatchesProcessed", ".", ".", {"stat": "Sum", "label": "Batches Processed"}]
+                ],
+                "period": 300,
+                "region": "${AWS::Region}",
+                "title": "Glue Streaming Batch Metrics"
+              }
+            }
+          ]
+        }
+
+  # ==================== CLOUDWATCH ALARMS ====================
+  
+  SQSDLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-sqs-dlq-messages'
+      AlarmDescription: Alert when messages land in DLQ
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt FileEventDLQ.QueueName
+      AlarmActions:
+        - !Ref AlertTopic
+      TreatMissingData: notBreaching
+
+  ManifestBuilderErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-manifest-builder-errors'
+      AlarmDescription: Alert when manifest builder has errors
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ManifestBuilderFunction
+      AlarmActions:
+        - !Ref AlertTopic
+      TreatMissingData: notBreaching
+
+  GlueJobFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-glue-job-failure'
+      AlarmDescription: Alert when Glue job fails
+      MetricName: JobRuns
+      Namespace: NDJSONPipeline
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: JobName
+          Value: !Ref GlueStreamingJob
+        - Name: State
+          Value: FAILED
+      AlarmActions:
+        - !Ref AlertTopic
+      TreatMissingData: notBreaching
+
+  QueueBacklogAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-queue-backlog'
+      AlarmDescription: Alert when queue backlog is too high
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      Statistic: Average
+      Period: 900  # 15 minutes
+      EvaluationPeriods: 2
+      Threshold: 1000
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt FileEventQueue.QueueName
+      AlarmActions:
+        - !Ref AlertTopic
+      TreatMissingData: notBreaching
+
+Outputs:
+  InputBucketName:
+    Description: Input S3 bucket for NDJSON files
+    Value: !Ref InputBucket
+    Export:
+      Name: !Sub '${ProjectName}-input-bucket'
+  
+  ManifestBucketName:
+    Description: Manifest S3 bucket
+    Value: !Ref ManifestBucket
+    Export:
+      Name: !Sub '${ProjectName}-manifest-bucket'
+  
+  OutputBucketName:
+    Description: Output S3 bucket for Parquet files
+    Value: !Ref OutputBucket
+    Export:
+      Name: !Sub '${ProjectName}-output-bucket'
+  
+  QuarantineBucketName:
+    Description: Quarantine S3 bucket
+    Value: !Ref QuarantineBucket
+    Export:
+      Name: !Sub '${ProjectName}-quarantine-bucket'
+  
+  LoggingBucketName:
+    Description: Logging S3 bucket
+    Value: !Ref LoggingBucket
+    Export:
+      Name: !Sub '${ProjectName}-logging-bucket'
+  
+  SQSQueueURL:
+    Description: SQS Queue URL
+    Value: !Ref FileEventQueue
+    Export:
+      Name: !Sub '${ProjectName}-queue-url'
+  
+  SQSDLQUrl:
+    Description: SQS Dead Letter Queue URL
+    Value: !Ref FileEventDLQ
+    Export:
+      Name: !Sub '${ProjectName}-dlq-url'
+  
+  GlueJobName:
+    Description: Glue streaming job name
+    Value: !Ref GlueStreamingJob
+    Export:
+      Name: !Sub '${ProjectName}-glue-job'
+  
+  DashboardURL:
+    Description: CloudWatch Dashboard URL
+    Value: !Sub 'https://console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${PipelineDashboard}'
+  
+  FileTrackingTableName:
+    Description: DynamoDB file tracking table
+    Value: !Ref FileTrackingTable
+    Export:
+      Name: !Sub '${ProjectName}-tracking-table'
+  
+  MetricsTableName:
+    Description: DynamoDB metrics table
+    Value: !Ref MetricsTable
+    Export:
+      Name: !Sub '${ProjectName}-metrics-table'
+  
+  AlertTopicArn:
+    Description: SNS Alert Topic ARN
+    Value: !Ref AlertTopic
+    Export:
+      Name: !Sub '${ProjectName}-alert-topic'

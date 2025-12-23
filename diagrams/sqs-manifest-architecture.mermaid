@@ -1,0 +1,77 @@
+graph TB
+    subgraph "Data Ingestion Layer"
+        S3Input["📦 S3 Input Bucket<br/>NDJSON Files<br/>(3.5MB each)<br/>~200,000 files/hour"]
+    end
+    
+    subgraph "Decoupling & Reliability Layer"
+        SQS["📮 SQS Queue<br/>Standard Queue<br/>• Dead Letter Queue<br/>• 14-day retention<br/>• Handles bursts<br/>~55 messages/second"]
+    end
+    
+    subgraph "Manifest Building Layer"
+        Lambda1["λ Lambda #1<br/>Manifest Builder<br/>──────────────<br/>• Receives SQS messages<br/>• Validates files (3.5MB ±10%)<br/>• Groups by date prefix<br/>• Creates 1GB batches<br/>• Builds manifest files<br/>──────────────<br/>512MB / 5s timeout"]
+        
+        DDB["🗄️ DynamoDB<br/>File Tracking Table<br/>──────────────<br/>PK: date_prefix<br/>SK: file_name<br/>──────────────<br/>• status<br/>• file_size_mb<br/>• manifest_path<br/>• job_run_id"]
+        
+        S3Manifest["📦 S3 Manifest Bucket<br/>Manifest Files<br/>──────────────<br/>manifests/YYYY-MM-DD/<br/>batch-NNNN-timestamp.json<br/>──────────────<br/>Each ~1GB of data<br/>(~286 files)"]
+        
+        Quarantine["🚫 S3 Quarantine<br/>Invalid Files<br/>──────────────<br/>• Wrong size<br/>• Bad format<br/>• Missing date"]
+    end
+    
+    subgraph "Processing Layer"
+        Glue["⚙️ AWS Glue Streaming Job<br/>PySpark Processing<br/>═══════════════════════<br/>Configuration:<br/>• Worker: G.2X (8 vCPU, 32GB)<br/>• Workers: 10<br/>• Mode: Streaming 24/7<br/>═══════════════════════<br/>Processing:<br/>• Reads manifests continuously<br/>• Merges ~286 files per batch<br/>• Casts all to string<br/>• Converts to Parquet<br/>• Snappy compression<br/>• Date partitioning<br/>═══════════════════════<br/>Performance:<br/>• ~700 batches/hour<br/>• 2-5 min per batch<br/>• Cost: $3,168/month"]
+    end
+    
+    subgraph "Output Layer"
+        S3Output["📦 S3 Output Bucket<br/>Parquet Files<br/>══════════════════<br/>merged-parquet-YYYY-MM-DD/<br/>  ├─ part-00000.parquet<br/>  ├─ part-00001.parquet<br/>  └─ ...<br/>══════════════════<br/>• Snappy compressed<br/>• Date partitioned<br/>• 128MB target size"]
+    end
+    
+    subgraph "Control Plane & Monitoring"
+        GlueState["📊 Glue Job State<br/>State Changes<br/>──────────────<br/>• RUNNING<br/>• SUCCEEDED<br/>• FAILED<br/>• TIMEOUT"]
+        
+        EB["⚡ EventBridge<br/>State Change Events<br/>──────────────<br/>Triggers on:<br/>• Job completion<br/>• Job failure<br/>• Job timeout"]
+        
+        Lambda2["λ Lambda #2<br/>Control Plane<br/>═══════════════════<br/>Responsibilities:<br/>• Updates file status in DynamoDB<br/>• Detects anomalies<br/>• Publishes CloudWatch metrics<br/>• Sends SNS alerts on failures<br/>• Tracks costs & performance<br/>═══════════════════<br/>256MB / 60s timeout"]
+        
+        Metrics["🗄️ DynamoDB<br/>Metrics Table<br/>──────────────<br/>• Job run stats<br/>• Execution time<br/>• DPU usage<br/>• Cost tracking<br/>• Anomalies"]
+        
+        CW["📊 CloudWatch<br/>Monitoring<br/>──────────────<br/>• Custom metrics<br/>• Job duration<br/>• Success rate<br/>• Cost per GB<br/>• Alarms"]
+        
+        SNS["📧 SNS Topic<br/>Alerts<br/>──────────────<br/>• Job failures<br/>• Timeouts<br/>• Anomalies<br/>• Cost alerts"]
+    end
+    
+    S3Input -->|"S3 Event<br/>Notifications"| SQS
+    SQS -->|"Poll messages<br/>(batch size: 10)"| Lambda1
+    
+    Lambda1 -->|"Track files"| DDB
+    Lambda1 -->|"Create manifests<br/>(1GB batches)"| S3Manifest
+    Lambda1 -->|"Invalid files"| Quarantine
+    
+    S3Manifest -->|"New manifest<br/>triggers job"| Glue
+    
+    Glue -->|"Read NDJSON<br/>files"| S3Input
+    Glue -->|"Write Parquet"| S3Output
+    
+    Glue -->|"State changes"| GlueState
+    GlueState -->|"Events"| EB
+    EB -->|"Trigger"| Lambda2
+    
+    Lambda2 -->|"Update file<br/>status"| DDB
+    Lambda2 -->|"Store metrics"| Metrics
+    Lambda2 -->|"Publish<br/>metrics"| CW
+    Lambda2 -->|"Send alerts<br/>on failure"| SNS
+    
+    style SQS fill:#51cf66,stroke:#2f9e44,stroke-width:3px,color:#fff
+    style Lambda1 fill:#4dabf7,stroke:#1971c2,stroke-width:2px,color:#fff
+    style S3Manifest fill:#ffd43b,stroke:#f08c00,stroke-width:2px
+    style Glue fill:#8b5cf6,stroke:#6d28d9,stroke-width:3px,color:#fff
+    style Lambda2 fill:#51cf66,stroke:#2f9e44,stroke-width:3px,color:#fff
+    style S3Input fill:#4dabf7,stroke:#1971c2,stroke-width:2px,color:#fff
+    style S3Output fill:#4dabf7,stroke:#1971c2,stroke-width:2px,color:#fff
+    style DDB fill:#4263eb,stroke:#364fc7,stroke-width:2px,color:#fff
+    style Metrics fill:#4263eb,stroke:#364fc7,stroke-width:2px,color:#fff
+    style CW fill:#10b981,stroke:#059669,stroke-width:2px,color:#fff
+    style SNS fill:#f59f00,stroke:#e67700,stroke-width:2px,color:#fff
+    style Quarantine fill:#ff6b6b,stroke:#c92a2a,stroke-width:2px,color:#fff
+    
+    classDef keyComponent fill:#51cf66,stroke:#2f9e44,stroke-width:4px,color:#fff
+    class SQS,Lambda2 keyComponent

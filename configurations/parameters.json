@@ -1,0 +1,38 @@
+[
+  {
+    "ParameterKey": "ProjectName",
+    "ParameterValue": "ndjson-parquet-sqs"
+  },
+  {
+    "ParameterKey": "InputBucketName",
+    "ParameterValue": "ndjson-input-dev"
+  },
+  {
+    "ParameterKey": "ManifestBucketName",
+    "ParameterValue": "ndjson-manifests-dev"
+  },
+  {
+    "ParameterKey": "OutputBucketName",
+    "ParameterValue": "parquet-output-dev"
+  },
+  {
+    "ParameterKey": "QuarantineBucketName",
+    "ParameterValue": "ndjson-quarantine-dev"
+  },
+  {
+    "ParameterKey": "MaxBatchSizeGB",
+    "ParameterValue": "0.5"
+  },
+  {
+    "ParameterKey": "GlueWorkerType",
+    "ParameterValue": "G.1X"
+  },
+  {
+    "ParameterKey": "GlueNumberOfWorkers",
+    "ParameterValue": "5"
+  },
+  {
+    "ParameterKey": "AlertEmail",
+    "ParameterValue": "magzine323@gmail.com"
+  }
+]

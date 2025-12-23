@@ -1,0 +1,11 @@
+{
+  "ProjectName": "ndjson-parquet-sqs",
+  "InputBucketName": "ndjson-input-prod",
+  "ManifestBucketName": "ndjson-manifests-prod",
+  "OutputBucketName": "parquet-output-prod",
+  "QuarantineBucketName": "ndjson-quarantine-prod",
+  "MaxBatchSizeGB": "1.0",
+  "GlueWorkerType": "G.2X",
+  "GlueNumberOfWorkers": "10",
+  "AlertEmail": "your-email@example.com"
+}

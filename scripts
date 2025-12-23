@@ -1,0 +1,190 @@
+# First, delete the failed stack
+aws cloudformation delete-stack --stack-name ndjson-parquet-sqs
+
+# Wait for deletion
+aws cloudformation wait stack-delete-complete --stack-name ndjson-parquet-sqs
+aws cloudformation wait stack-delete-complete --stack-name ndjson-parquet-sqs-db
+aws cloudformation wait stack-delete-complete --stack-name ndjson-parquet-sqs-sqs
+aws cloudformation wait stack-delete-complete --stack-name ndjson-parquet-sqs-s3
+aws cloudformation wait stack-delete-complete --stack-name ndjson-parquet-sqs-iam
+
+
+# Now recreate the stack
+aws cloudformation create-stack \
+  --stack-name ndjson-parquet-sqs \
+  --template-body file://cloudformation-sqs-manifest.yaml \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --tags Key=Environment,Value=Production Key=Team,Value=DataEngineering
+
+aws cloudformation create-stack \
+  --stack-name ndjson-parquet-sqs-db \
+  --template-body file://cloudformation-sqs-manifest-db.yaml \
+  --parameters file://parameters.json \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --tags Key=Environment,Value=Production Key=Team,Value=DataEngineering
+
+aws cloudformation create-stack \
+  --stack-name ndjson-parquet-sqs-sqs \
+  --template-body file://cloudformation-sqs-manifest-sqs.yaml \
+  --parameters file://parameters.json \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --tags Key=Environment,Value=Production Key=Team,Value=DataEngineering
+
+aws cloudformation create-stack \
+  --stack-name ndjson-parquet-sqs-s3\
+  --template-body file://cloudformation-sqs-manifest-s3.yaml \
+  --parameters file://parameters.json \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --tags Key=Environment,Value=Production Key=Team,Value=DataEngineering
+
+aws cloudformation create-stack \
+  --stack-name ndjson-parquet-sqs-iam\
+  --template-body file://cloudformation-sqs-manifest-iam.yaml \
+  --parameters file://parameters.json \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --tags Key=Environment,Value=Production Key=Team,Value=DataEngineering
+  
+aws cloudformation create-stack \
+  --stack-name ndjson-parquet-sqs-app \
+  --template-body file://cloudformation-sqs-manifest-app.yaml \
+  --parameters file://parameters.json \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --tags Key=Environment,Value=Production Key=Team,Value=DataEngineering
+    
+  # Watch stack events
+aws cloudformation describe-stack-events \
+  --stack-name ndjson-parquet-sqs \
+  --max-items 20
+
+# Or use wait command (blocks until complete)
+aws cloudformation wait stack-create-complete \
+  --stack-name ndjson-parquet-sqs
+
+  # Watch stack events
+aws cloudformation describe-stack-events \
+  --stack-name ndjson-parquet-sqs > Configurations/stack-events-log.json
+  \
+  --max-items 20 > Configurations/stack-events-log.json
+  --query 'StackEvents[?ResourceStatus==`CREATE_FAILED`].[ResourceType,LogicalResourceId,ResourceStatus,ResourceStatusReason,Timestamp]' \
+  --output table
+
+
+
+
+aws s3 rb s3://ndjson-parquet-sqs-logs-804450520964 --force
+aws s3 rb s3://ndjson-manifests-804450520964 --force
+aws s3 rb s3://parquet-output-sqs-804450520964 --force
+aws s3 rb s3://ndjson-quarantine-804450520964 --force
+aws sns delete-topic --topic-arn arn:aws:sns:us-east-1:804450520964:ndjson-parquet-sqs-alerts
+aws sqs delete-queue --queue-url https://sqs.us-east-1.amazonaws.com/804450520964/ndjson-parquet-sqs-file-events
+aws dynamodb delete-table --table-name ndjson-parquet-sqs-file-tracking --region us-east-1
+
+
+
+# Create deployment package
+cd lambda/
+zip -r manifest-builder.zip lambda_manifest_builder.py
+
+# Upload to Lambda
+aws lambda update-function-code \
+  --function-name ndjson-parquet-sqs-manifest-builder \
+  --zip-file fileb://manifest-builder.zip
+
+# Wait for update to complete
+aws lambda wait function-updated \
+  --function-name ndjson-parquet-sqs-manifest-builder
+
+# Verify
+aws lambda get-function \
+  --function-name ndjson-parquet-sqs-manifest-builder \
+  --query 'Configuration.[Runtime,MemorySize,Timeout]'
+
+
+Set-AWSCredential `
+                 -AccessKey ASIA3WTH4Z6CHGXLGVKR `
+                 -SecretKey odGyEvDFwpn8fuMXLk13K77q5zuMr9Nj8DVsGdSd `
+                 -StoreAs MyNewProfile
+
+
+# Upload a test NDJSON file
+aws s3 cp 2025-12-21-test0001.ndjson s3://ndjson-input-sqs-804450520964/
+aws s3 cp 2025-12-21-test0002.ndjson s3://ndjson-input-sqs-804450520964/
+aws s3 cp 2025-12-21-test0003.ndjson s3://ndjson-input-sqs-804450520964/
+aws s3 cp 2025-12-21-test0004.ndjson s3://ndjson-input-sqs-804450520964/
+aws s3 cp 2025-12-21-test0005.ndjson s3://ndjson-input-sqs-804450520964/
+aws s3 cp 2025-12-21-test0006.ndjson s3://ndjson-input-sqs-804450520964/
+
+# View Lambda logs
+aws logs tail /aws/lambda/ndjson-parquet-sqs-manifest-builder --follow
+
+# Check the CloudWatch Dashboard (URL in stack outputs)
+bash verify-deployment.sh
+
+
+📋 Generated Files
+1. teardown.sh - Automated Cleanup Script
+A robust shell script with multiple cleanup modes: Features:
+Dry-run mode - Preview deletions before executing
+Three cleanup modes:
+--full - Delete CloudFormation stack + all temp files
+--temp-only - Clean debug files, keep AWS infrastructure
+--stack-only - Delete only the CloudFormation stack
+Optional flags:
+--keep-generated - Preserve test data files
+--dry-run - Preview without deleting
+Color-coded output for easy reading
+Confirmation prompts for destructive operations
+Usage Examples:
+
+# Preview what will be deleted
+./teardown.sh --dry-run --full
+
+# Clean only temporary files (safe)
+./teardown.sh --temp-only
+
+# Full cleanup
+./teardown.sh --full
+
+# Keep test data while cleaning
+./teardown.sh --temp-only --keep-generated
+2. FILE-MANAGEMENT.md - Complete Documentation
+Comprehensive file management guide including: Contents:
+File categorization - Which files to keep, delete, or archive
+Manifest lifecycle - How manifests are created, processed, and cleaned up
+Cleanup workflows - Step-by-step procedures for different scenarios
+Manual cleanup commands - Alternative to automated script
+Best practices - Guidelines for maintaining the project
+Recovery procedures - How to restore accidentally deleted files
+📁 File Categories Identified
+✅ KEEP (Core Project Files)
+Application code in app/
+Main configuration files
+Documentation in Documentations/
+Deployment scripts (deploy.sh, deploy.ps1)
+Architecture diagrams
+❌ DELETE (Debug/Temporary Files)
+Error logs: current-error.json, latest-failure.json, newest-failure.json
+Debug output: stack-events.txt, stack-resources.txt, notes.txt
+Debug scripts: check-latest-error.sh, get-errors.sh, quick-redeploy.sh, etc.
+Temp directories: configurations/temp/, build/
+Generated test data: 2025-*.ndjson files (optional)
+📦 ARCHIVE (Release Packages)
+zip/ndjson-parquet-pipeline-v1.1.0/ - Version snapshot
+🔄 Manifest Lifecycle Management
+The documentation includes detailed manifest lifecycle:
+Creation - S3 events trigger manifest builder
+Processing - Control plane processes manifests
+Success - Auto-cleanup of processed files
+Failure - Quarantine and DLQ handling
+Manual cleanup - Commands for old manifests
+🚀 Quick Start
+
+# Make executable (already done)
+chmod +x teardown.sh
+
+# Preview cleanup
+./teardown.sh --dry-run --temp-only
+
+# Execute cleanup
+./teardown.sh --temp-only
+The system is now ready to help you maintain a clean project structure while preserving essential files and managing the manifest lifecycle effectively!

@@ -1,0 +1,82 @@
+{
+    "StackResourceSummaries": [
+        {
+            "LogicalResourceId": "AlertTopic",
+            "PhysicalResourceId": "arn:aws:sns:us-east-1:804450520964:ndjson-parquet-sqs-alerts",
+            "ResourceType": "AWS::SNS::Topic",
+            "LastUpdatedTimestamp": "2025-12-23T03:50:23.075000+00:00",
+            "ResourceStatus": "DELETE_COMPLETE",
+            "DriftInformation": {
+                "StackResourceDriftStatus": "NOT_CHECKED"
+            }
+        },
+        {
+            "LogicalResourceId": "FileEventDLQ",
+            "PhysicalResourceId": "https://sqs.us-east-1.amazonaws.com/804450520964/ndjson-parquet-sqs-file-events-dlq",
+            "ResourceType": "AWS::SQS::Queue",
+            "LastUpdatedTimestamp": "2025-12-23T03:50:07.881000+00:00",
+            "ResourceStatus": "DELETE_COMPLETE",
+            "DriftInformation": {
+                "StackResourceDriftStatus": "NOT_CHECKED"
+            }
+        },
+        {
+            "LogicalResourceId": "FileTrackingTable",
+            "ResourceType": "AWS::DynamoDB::Table",
+            "LastUpdatedTimestamp": "2025-12-23T03:49:37.035000+00:00",
+            "ResourceStatus": "DELETE_SKIPPED",
+            "DriftInformation": {
+                "StackResourceDriftStatus": "NOT_CHECKED"
+            }
+        },
+        {
+            "LogicalResourceId": "LoggingBucket",
+            "PhysicalResourceId": "ndjson-parquet-sqs-logs-804450520964",
+            "ResourceType": "AWS::S3::Bucket",
+            "LastUpdatedTimestamp": "2025-12-23T03:49:37.192000+00:00",
+            "ResourceStatus": "DELETE_SKIPPED",
+            "DriftInformation": {
+                "StackResourceDriftStatus": "NOT_CHECKED"
+            }
+        },
+        {
+            "LogicalResourceId": "ManifestBucket",
+            "ResourceType": "AWS::S3::Bucket",
+            "LastUpdatedTimestamp": "2025-12-23T03:49:37.045000+00:00",
+            "ResourceStatus": "DELETE_SKIPPED",
+            "DriftInformation": {
+                "StackResourceDriftStatus": "NOT_CHECKED"
+            }
+        },
+        {
+            "LogicalResourceId": "MetricsTable",
+            "PhysicalResourceId": "ndjson-parquet-sqs-metrics",
+            "ResourceType": "AWS::DynamoDB::Table",
+            "LastUpdatedTimestamp": "2025-12-23T03:49:38.168000+00:00",
+            "ResourceStatus": "DELETE_COMPLETE",
+            "DriftInformation": {
+                "StackResourceDriftStatus": "NOT_CHECKED"
+            }
+        },
+        {
+            "LogicalResourceId": "OutputBucket",
+            "PhysicalResourceId": "parquet-output-sqs-804450520964",
+            "ResourceType": "AWS::S3::Bucket",
+            "LastUpdatedTimestamp": "2025-12-23T03:49:37.178000+00:00",
+            "ResourceStatus": "DELETE_SKIPPED",
+            "DriftInformation": {
+                "StackResourceDriftStatus": "NOT_CHECKED"
+            }
+        },
+        {
+            "LogicalResourceId": "QuarantineBucket",
+            "PhysicalResourceId": "ndjson-quarantine-804450520964",
+            "ResourceType": "AWS::S3::Bucket",
+            "LastUpdatedTimestamp": "2025-12-23T03:49:37.246000+00:00",
+            "ResourceStatus": "DELETE_SKIPPED",
+            "DriftInformation": {
+                "StackResourceDriftStatus": "NOT_CHECKED"
+            }
+        }
+    ]
+}

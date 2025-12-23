@@ -1,0 +1,892 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'SQS + Manifest + Glue Streaming NDJSON to Parquet Pipeline (v1.1.0 - Updated with code review fixes)'
+
+# Version 1.1.0 Changes:
+# - Added DeletionPolicy and UpdateReplacePolicy to S3 buckets
+# - Added configurable file validation environment variables
+# - Added lock TTL configuration
+# - Enhanced alarms and monitoring
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: ndjson-parquet-sqs
+    Description: Project name for resource naming
+  
+  InputBucketName:
+    Type: String
+    Description: S3 bucket for incoming NDJSON files
+    Default: ndjson-input-sqs
+  
+  ManifestBucketName:
+    Type: String
+    Description: S3 bucket for manifest files
+    Default: ndjson-manifests
+  
+  OutputBucketName:
+    Type: String
+    Description: S3 bucket for output Parquet files
+    Default: parquet-output-sqs
+  
+  QuarantineBucketName:
+    Type: String
+    Description: S3 bucket for quarantined files
+    Default: ndjson-quarantine
+  
+  MaxBatchSizeGB:
+    Type: Number
+    Default: 1.0
+    Description: Maximum manifest batch size in GB
+  
+  ExpectedFileSizeMB:
+    Type: Number
+    Default: 3.5
+    Description: Expected NDJSON file size in MB
+  
+  SizeTolerancePercent:
+    Type: Number
+    Default: 10
+    Description: Allowed variance in file size (percent)
+  
+  GlueWorkerType:
+    Type: String
+    Default: G.2X
+    AllowedValues: [G.1X, G.2X, G.4X, G.8X]
+    Description: Glue worker type
+  
+  GlueNumberOfWorkers:
+    Type: Number
+    Default: 10
+    Description: Number of Glue workers for streaming job
+  
+  AlertEmail:
+    Type: String
+    Description: Email address for alerts
+    Default: data-team@example.com
+
+Resources:
+  # ==================== S3 BUCKETS ====================
+  
+  InputBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub '${InputBucketName}-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: s3:ObjectCreated:*
+            Queue: !GetAtt FileEventQueue.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .ndjson
+      LoggingConfiguration:
+        DestinationBucketName: !Ref LoggingBucket
+        LogFilePrefix: input-bucket-logs/
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Purpose
+          Value: NDJSON Input Storage
+
+  ManifestBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub '${ManifestBucketName}-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldManifests
+            Status: Enabled
+            ExpirationInDays: 7
+            Prefix: manifests/
+          - Id: DeleteOldCheckpoints
+            Status: Enabled
+            ExpirationInDays: 7
+            Prefix: checkpoints/
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Purpose
+          Value: Manifest Storage
+
+  OutputBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub '${OutputBucketName}-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      IntelligentTieringConfigurations:
+        - Id: EntirePrefix
+          Status: Enabled
+          Tierings:
+            - AccessTier: ARCHIVE_ACCESS
+              Days: 90
+            - AccessTier: DEEP_ARCHIVE_ACCESS
+              Days: 180
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Purpose
+          Value: Parquet Output Storage
+
+  QuarantineBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub '${QuarantineBucketName}-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireQuarantinedFiles
+            Status: Enabled
+            ExpirationInDays: 30
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Purpose
+          Value: Quarantine Storage
+
+  LoggingBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub '${ProjectName}-logs-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldLogs
+            Status: Enabled
+            ExpirationInDays: 90
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Purpose
+          Value: Access Logging
+
+  LoggingBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref LoggingBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: S3ServerAccessLogsPolicy
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub '${LoggingBucket.Arn}/*'
+            Condition:
+              ArnLike:
+                aws:SourceArn: !GetAtt InputBucket.Arn
+
+  # ==================== SQS QUEUES ====================
+  
+  FileEventQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${ProjectName}-file-events'
+      VisibilityTimeout: 900  # 15 minutes (5x Lambda timeout)
+      MessageRetentionPeriod: 1209600  # 14 days
+      ReceiveMessageWaitTimeSeconds: 20  # Long polling
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt FileEventDLQ.Arn
+        maxReceiveCount: 3
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  FileEventDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${ProjectName}-file-events-dlq'
+      MessageRetentionPeriod: 1209600  # 14 days
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  FileEventQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref FileEventQueue
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action:
+              - sqs:SendMessage
+            Resource: !GetAtt FileEventQueue.Arn
+            Condition:
+              ArnLike:
+                aws:SourceArn: !GetAtt InputBucket.Arn
+
+  # ==================== DYNAMODB TABLES ====================
+  
+  FileTrackingTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub '${ProjectName}-file-tracking'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: date_prefix
+          AttributeType: S
+        - AttributeName: file_name
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+      KeySchema:
+        - AttributeName: date_prefix
+          KeyType: HASH
+        - AttributeName: file_name
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: status-index
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+            - AttributeName: date_prefix
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      TimeToLiveSpecification:
+        Enabled: true
+        AttributeName: ttl
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  MetricsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ProjectName}-metrics'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: metric_date
+          AttributeType: S
+        - AttributeName: metric_type
+          AttributeType: S
+      KeySchema:
+        - AttributeName: metric_date
+          KeyType: HASH
+        - AttributeName: metric_type
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        Enabled: true
+        AttributeName: ttl
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ==================== IAM ROLES ====================
+  
+  ManifestBuilderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-manifest-builder-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ManifestBuilderPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt FileEventQueue.Arn
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:HeadObject
+                Resource: !Sub '${InputBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource: !Sub '${ManifestBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:CopyObject
+                Resource: !Sub '${QuarantineBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                  - dynamodb:GetItem
+                  - dynamodb:DeleteItem
+                Resource:
+                  - !GetAtt FileTrackingTable.Arn
+                  - !Sub '${FileTrackingTable.Arn}/index/*'
+              - Effect: Allow
+                Action:
+                  - glue:StartJobRun
+                Resource: !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:job/${ProjectName}-streaming-processor'
+
+  ControlPlaneRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-control-plane-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ControlPlanePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - glue:GetJobRun
+                  - glue:GetJob
+                Resource:
+                  - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:job/${ProjectName}-streaming-processor'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub '${ManifestBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - dynamodb:UpdateItem
+                  - dynamodb:PutItem
+                  - dynamodb:Query
+                  - dynamodb:GetItem
+                Resource:
+                  - !GetAtt FileTrackingTable.Arn
+                  - !Sub '${FileTrackingTable.Arn}/index/*'
+                  - !GetAtt MetricsTable.Arn
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref AlertTopic
+
+  GlueJobRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-glue-job-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: GlueJobS3Policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt InputBucket.Arn
+                  - !Sub '${InputBucket.Arn}/*'
+                  - !GetAtt ManifestBucket.Arn
+                  - !Sub '${ManifestBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:GetObject
+                Resource:
+                  - !Sub '${OutputBucket.Arn}/*'
+                  - !Sub '${ManifestBucket.Arn}/checkpoints/*'
+                  - !Sub '${ManifestBucket.Arn}/spark-logs/*'
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: '*'
+
+  # ==================== LAMBDA FUNCTIONS ====================
+  
+  ManifestBuilderFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-manifest-builder'
+      Runtime: python3.11
+      Handler: lambda_manifest_builder.lambda_handler
+      Role: !GetAtt ManifestBuilderRole.Arn
+      Timeout: 180
+      MemorySize: 512
+      Environment:
+        Variables:
+          MANIFEST_BUCKET: !Ref ManifestBucket
+          TRACKING_TABLE: !Ref FileTrackingTable
+          GLUE_JOB_NAME: !Ref GlueStreamingJob
+          MAX_BATCH_SIZE_GB: !Ref MaxBatchSizeGB
+          QUARANTINE_BUCKET: !Ref QuarantineBucket
+          EXPECTED_FILE_SIZE_MB: !Ref ExpectedFileSizeMB
+          SIZE_TOLERANCE_PERCENT: !Ref SizeTolerancePercent
+          LOCK_TABLE: !Ref FileTrackingTable
+          LOCK_TTL_SECONDS: '300'
+      Code:
+        ZipFile: |
+          # Placeholder - upload lambda_manifest_builder.py
+          import json
+          def lambda_handler(event, context):
+              return {'statusCode': 200, 'body': json.dumps('Upload actual code')}
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  ManifestBuilderEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt FileEventQueue.Arn
+      FunctionName: !Ref ManifestBuilderFunction
+      BatchSize: 10
+      MaximumBatchingWindowInSeconds: 30
+      Enabled: true
+
+  ControlPlaneFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-control-plane'
+      Runtime: python3.11
+      Handler: lambda_control_plane.lambda_handler
+      Role: !GetAtt ControlPlaneRole.Arn
+      Timeout: 60
+      MemorySize: 256
+      Environment:
+        Variables:
+          TRACKING_TABLE: !Ref FileTrackingTable
+          METRICS_TABLE: !Ref MetricsTable
+          ALERT_TOPIC_ARN: !Ref AlertTopic
+          GLUE_JOB_NAME: !Ref GlueStreamingJob
+      Code:
+        ZipFile: |
+          # Placeholder - upload lambda_control_plane.py
+          import json
+          def lambda_handler(event, context):
+              return {'statusCode': 200, 'body': json.dumps('Upload actual code')}
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ==================== GLUE JOB ====================
+  
+  GlueStreamingJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub '${ProjectName}-streaming-processor'
+      Description: Streaming NDJSON to Parquet converter (manifest-based) v1.1.0
+      Role: !GetAtt GlueJobRole.Arn
+      GlueVersion: '4.0'
+      Command:
+        Name: gluestreaming
+        ScriptLocation: !Sub 's3://${ManifestBucket}/scripts/glue_streaming_job.py'
+        PythonVersion: '3'
+      DefaultArguments:
+        '--job-language': python
+        '--job-bookmark-option': job-bookmark-disable
+        '--enable-metrics': 'true'
+        '--enable-spark-ui': 'true'
+        '--spark-event-logs-path': !Sub 's3://${ManifestBucket}/spark-logs/'
+        '--enable-continuous-cloudwatch-log': 'true'
+        '--enable-continuous-log-filter': 'true'
+        '--MANIFEST_BUCKET': !Ref ManifestBucket
+        '--OUTPUT_BUCKET': !Ref OutputBucket
+        '--COMPRESSION_TYPE': 'snappy'
+      MaxRetries: 0
+      Timeout: 2880  # 48 hours
+      WorkerType: !Ref GlueWorkerType
+      NumberOfWorkers: !Ref GlueNumberOfWorkers
+      ExecutionProperty:
+        MaxConcurrentRuns: 1  # Streaming job runs continuously
+      Tags:
+        Project: !Ref ProjectName
+
+  # ==================== EVENTBRIDGE RULES ====================
+  
+  GlueStateChangeRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${ProjectName}-glue-state-change'
+      Description: Trigger control plane on Glue job state changes
+      EventPattern:
+        source:
+          - aws.glue
+        detail-type:
+          - Glue Job State Change
+        detail:
+          jobName:
+            - !Ref GlueStreamingJob
+          state:
+            - SUCCEEDED
+            - FAILED
+            - TIMEOUT
+            - STOPPED
+            - RUNNING
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt ControlPlaneFunction.Arn
+          Id: ControlPlaneTarget
+
+  ControlPlaneLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ControlPlaneFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt GlueStateChangeRule.Arn
+
+  # ==================== SNS TOPICS ====================
+  
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ProjectName}-alerts'
+      DisplayName: Pipeline Alerts
+      Subscription:
+        - Endpoint: !Ref AlertEmail
+          Protocol: email
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ==================== CLOUDWATCH DASHBOARDS ====================
+  
+  PipelineDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub '${ProjectName}-pipeline'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  ["AWS/SQS", "NumberOfMessagesSent", "QueueName", "${FileEventQueue.QueueName}", {"stat": "Sum", "label": "Messages Received"}],
+                  [".", "ApproximateNumberOfMessagesVisible", ".", ".", {"stat": "Average", "label": "Queue Depth"}]
+                ],
+                "period": 300,
+                "region": "${AWS::Region}",
+                "title": "SQS Queue Metrics",
+                "yAxis": {"left": {"min": 0}}
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", "${FileEventDLQ.QueueName}", {"stat": "Sum", "label": "DLQ Messages", "color": "#d62728"}]
+                ],
+                "period": 300,
+                "region": "${AWS::Region}",
+                "title": "Dead Letter Queue",
+                "yAxis": {"left": {"min": 0}}
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  ["AWS/Lambda", "Invocations", "FunctionName", "${ManifestBuilderFunction}", {"stat": "Sum", "label": "Manifest Builder"}],
+                  [".", "Errors", ".", ".", {"stat": "Sum", "label": "Errors", "color": "#d62728"}],
+                  [".", "Duration", ".", ".", {"stat": "Average", "label": "Avg Duration"}]
+                ],
+                "period": 300,
+                "region": "${AWS::Region}",
+                "title": "Lambda Metrics"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  ["NDJSONPipeline", "JobRuns", "JobName", "${GlueStreamingJob}", "State", "SUCCEEDED", {"stat": "Sum", "label": "Succeeded"}],
+                  ["...", "FAILED", {"stat": "Sum", "label": "Failed", "color": "#d62728"}],
+                  [".", "JobExecutionTime", ".", ".", ".", "SUCCEEDED", {"stat": "Average", "label": "Avg Execution Time"}]
+                ],
+                "period": 300,
+                "region": "${AWS::Region}",
+                "title": "Glue Job Metrics"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 12,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  ["NDJSONPipeline", "DPUSeconds", "JobName", "${GlueStreamingJob}", {"stat": "Sum", "label": "DPU Seconds"}],
+                  [".", "EstimatedCostUSD", ".", ".", {"stat": "Sum", "label": "Estimated Cost ($)"}]
+                ],
+                "period": 3600,
+                "region": "${AWS::Region}",
+                "title": "Cost Metrics (Hourly)"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 12,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  ["GlueStreaming", "BatchProcessingTime", "JobName", "ndjson-parquet-streaming", {"stat": "Average", "label": "Avg Batch Time"}],
+                  [".", "BatchesProcessed", ".", ".", {"stat": "Sum", "label": "Batches Processed"}]
+                ],
+                "period": 300,
+                "region": "${AWS::Region}",
+                "title": "Glue Streaming Batch Metrics"
+              }
+            }
+          ]
+        }
+
+  # ==================== CLOUDWATCH ALARMS ====================
+  
+  SQSDLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-sqs-dlq-messages'
+      AlarmDescription: Alert when messages land in DLQ
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt FileEventDLQ.QueueName
+      AlarmActions:
+        - !Ref AlertTopic
+      TreatMissingData: notBreaching
+
+  ManifestBuilderErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-manifest-builder-errors'
+      AlarmDescription: Alert when manifest builder has errors
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ManifestBuilderFunction
+      AlarmActions:
+        - !Ref AlertTopic
+      TreatMissingData: notBreaching
+
+  GlueJobFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-glue-job-failure'
+      AlarmDescription: Alert when Glue job fails
+      MetricName: JobRuns
+      Namespace: NDJSONPipeline
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: JobName
+          Value: !Ref GlueStreamingJob
+        - Name: State
+          Value: FAILED
+      AlarmActions:
+        - !Ref AlertTopic
+      TreatMissingData: notBreaching
+
+  QueueBacklogAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-queue-backlog'
+      AlarmDescription: Alert when queue backlog is too high
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      Statistic: Average
+      Period: 900  # 15 minutes
+      EvaluationPeriods: 2
+      Threshold: 1000
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt FileEventQueue.QueueName
+      AlarmActions:
+        - !Ref AlertTopic
+      TreatMissingData: notBreaching
+
+Outputs:
+  InputBucketName:
+    Description: Input S3 bucket for NDJSON files
+    Value: !Ref InputBucket
+    Export:
+      Name: !Sub '${ProjectName}-input-bucket'
+  
+  ManifestBucketName:
+    Description: Manifest S3 bucket
+    Value: !Ref ManifestBucket
+    Export:
+      Name: !Sub '${ProjectName}-manifest-bucket'
+  
+  OutputBucketName:
+    Description: Output S3 bucket for Parquet files
+    Value: !Ref OutputBucket
+    Export:
+      Name: !Sub '${ProjectName}-output-bucket'
+  
+  QuarantineBucketName:
+    Description: Quarantine S3 bucket
+    Value: !Ref QuarantineBucket
+    Export:
+      Name: !Sub '${ProjectName}-quarantine-bucket'
+  
+  LoggingBucketName:
+    Description: Logging S3 bucket
+    Value: !Ref LoggingBucket
+    Export:
+      Name: !Sub '${ProjectName}-logging-bucket'
+  
+  SQSQueueURL:
+    Description: SQS Queue URL
+    Value: !Ref FileEventQueue
+    Export:
+      Name: !Sub '${ProjectName}-queue-url'
+  
+  SQSDLQUrl:
+    Description: SQS Dead Letter Queue URL
+    Value: !Ref FileEventDLQ
+    Export:
+      Name: !Sub '${ProjectName}-dlq-url'
+  
+  GlueJobName:
+    Description: Glue streaming job name
+    Value: !Ref GlueStreamingJob
+    Export:
+      Name: !Sub '${ProjectName}-glue-job'
+  
+  DashboardURL:
+    Description: CloudWatch Dashboard URL
+    Value: !Sub 'https://console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${PipelineDashboard}'
+  
+  FileTrackingTableName:
+    Description: DynamoDB file tracking table
+    Value: !Ref FileTrackingTable
+    Export:
+      Name: !Sub '${ProjectName}-tracking-table'
+  
+  MetricsTableName:
+    Description: DynamoDB metrics table
+    Value: !Ref MetricsTable
+    Export:
+      Name: !Sub '${ProjectName}-metrics-table'
+  
+  AlertTopicArn:
+    Description: SNS Alert Topic ARN
+    Value: !Ref AlertTopic
+    Export:
+      Name: !Sub '${ProjectName}-alert-topic'

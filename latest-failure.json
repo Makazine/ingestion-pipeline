@@ -1,0 +1,15 @@
+[
+    {
+        "StackId": "arn:aws:cloudformation:us-east-1:804450520964:stack/ndjson-parquet-sqs/4a19d680-dfb4-11f0-8d36-12317b06ef35",
+        "EventId": "InputBucket-CREATE_FAILED-2025-12-23T04:03:49.342Z",
+        "StackName": "ndjson-parquet-sqs",
+        "OperationId": "2b619b2e-08ed-44ce-a299-cf3bbd3cf5af",
+        "LogicalResourceId": "InputBucket",
+        "PhysicalResourceId": "ndjson-input-sqs-804450520964",
+        "ResourceType": "AWS::S3::Bucket",
+        "Timestamp": "2025-12-23T04:03:49.342000+00:00",
+        "ResourceStatus": "CREATE_FAILED",
+        "ResourceStatusReason": "Resource handler returned message: \"Unable to validate the following destination configurations (Service: S3, Status Code: 400, Request ID: KKBSQBVFBCK1PDS0, Extended Request ID: eauJ7q3J4Z/slrS8QfWmQERlFhhelr7gxA5AfDyiiWzKEKwQF/bHGX9jWtxDn/NebJYGl98NP1s=) (SDK Attempt Count: 1)\" (RequestToken: 4d3d18f1-d49f-37d1-b9cc-67479dfb5de1, HandlerErrorCode: InvalidRequest)",
+        "ResourceProperties": "{\"PublicAccessBlockConfiguration\":{\"RestrictPublicBuckets\":\"true\",\"BlockPublicPolicy\":\"true\",\"BlockPublicAcls\":\"true\",\"IgnorePublicAcls\":\"true\"},\"BucketName\":\"ndjson-input-sqs-804450520964\",\"BucketEncryption\":{\"ServerSideEncryptionConfiguration\":[{\"ServerSideEncryptionByDefault\":{\"SSEAlgorithm\":\"AES256\"}}]},\"LoggingConfiguration\":{\"LogFilePrefix\":\"input-bucket-logs/\",\"DestinationBucketName\":\"ndjson-parquet-sqs-logs-804450520964\"},\"NotificationConfiguration\":{\"QueueConfigurations\":[{\"Filter\":{\"S3Key\":{\"Rules\":[{\"Value\":\".ndjson\",\"Name\":\"suffix\"}]}},\"Event\":\"s3:ObjectCreated:*\",\"Queue\":\"arn:aws:sqs:us-east-1:804450520964:ndjson-parquet-sqs-file-events\"}]},\"VersioningConfiguration\":{\"Status\":\"Enabled\"},\"Tags\":[{\"Value\":\"ndjson-parquet-sqs\",\"Key\":\"Project\"},{\"Value\":\"NDJSON Input Storage\",\"Key\":\"Purpose\"}]}"
+    }
+]

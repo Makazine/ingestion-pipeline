@@ -1,0 +1,77 @@
+---
+title: NDJSON File Lifecycle - State Diagram
+---
+stateDiagram-v2
+    [*] --> Uploaded: File lands in S3
+    
+    Uploaded --> Queued: S3 Event → SQS
+    
+    Queued --> Validating: Lambda polls message
+    
+    Validating --> Pending: ✅ Valid file
+    Validating --> Quarantined: ❌ Invalid file
+    
+    Pending --> Manifested: Added to batch manifest
+    Pending --> Pending: Waiting for batch (< 1GB)
+    
+    Manifested --> Processing: Glue picks up manifest
+    
+    Processing --> Completed: ✅ Glue job succeeds
+    Processing --> Failed: ❌ Glue job fails
+    Processing --> Timeout: ⏰ Glue job times out
+    Processing --> Stopped: 🛑 Manual stop
+    
+    Failed --> Pending: Manual reprocess
+    Timeout --> Pending: Manual reprocess
+    Stopped --> Pending: Manual reprocess
+    
+    Quarantined --> [*]: 30-day expiration
+    Completed --> [*]: 7-day TTL cleanup
+    
+    note right of Uploaded
+        File uploaded to S3 Input bucket
+        Triggers S3 event notification
+    end note
+    
+    note right of Validating
+        Lambda validates:
+        • File size (3.5MB ±10%)
+        • Filename format (yyyy-mm-dd-*)
+        • Extension (.ndjson)
+    end note
+    
+    note right of Pending
+        Tracked in DynamoDB
+        Waiting for batch to reach 1GB
+        (~286 files per batch)
+    end note
+    
+    note right of Manifested
+        Manifest created in S3
+        Contains list of file URIs
+        Ready for Glue processing
+    end note
+    
+    note right of Processing
+        Glue Streaming job reads manifest
+        Converts NDJSON → Parquet
+        Updates checkpoint
+    end note
+    
+    note right of Completed
+        Parquet written to output
+        DynamoDB status updated
+        Metrics recorded
+    end note
+    
+    note left of Quarantined
+        Invalid files moved here
+        Error reason recorded
+        30-day retention
+    end note
+    
+    note left of Failed
+        Error message recorded
+        SNS alert sent
+        Can be manually reprocessed
+    end note

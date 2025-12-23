@@ -1,0 +1,216 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'SQS + Manifest + Glue Streaming NDJSON to Parquet Pipeline (v1.1.0 - Updated with code review fixes)'
+
+# Version 1.1.0 Changes:
+# - Added DeletionPolicy and UpdateReplacePolicy to S3 buckets
+# - Added configurable file validation environment variables
+# - Added lock TTL configuration
+# - Enhanced alarms and monitoring
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: ndjson-parquet-sqs
+    Description: Project name for resource naming
+  
+  InputBucketName:
+    Type: String
+    Description: S3 bucket for incoming NDJSON files
+    Default: ndjson-input-sqs
+  
+  ManifestBucketName:
+    Type: String
+    Description: S3 bucket for manifest files
+    Default: ndjson-manifests
+  
+  OutputBucketName:
+    Type: String
+    Description: S3 bucket for output Parquet files
+    Default: parquet-output-sqs
+  
+  QuarantineBucketName:
+    Type: String
+    Description: S3 bucket for quarantined files
+    Default: ndjson-quarantine
+  
+  MaxBatchSizeGB:
+    Type: Number
+    Default: 1.0
+    Description: Maximum manifest batch size in GB
+  
+  ExpectedFileSizeMB:
+    Type: Number
+    Default: 3.5
+    Description: Expected NDJSON file size in MB
+  
+  SizeTolerancePercent:
+    Type: Number
+    Default: 10
+    Description: Allowed variance in file size (percent)
+  
+  GlueWorkerType:
+    Type: String
+    Default: G.2X
+    AllowedValues: [G.1X, G.2X, G.4X, G.8X]
+    Description: Glue worker type
+  
+  GlueNumberOfWorkers:
+    Type: Number
+    Default: 10
+    Description: Number of Glue workers for streaming job
+  
+  AlertEmail:
+    Type: String
+    Description: Email address for alerts
+    Default: magzine323@gmail.com
+
+Resources:
+  # ==================== S3 BUCKETS ====================
+  
+
+  # ==================== IAM ROLES ====================
+  
+  ManifestBuilderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-manifest-builder-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ManifestBuilderPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt FileEventQueue.Arn
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:HeadObject
+                Resource: !Sub '${InputBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource: !Sub '${ManifestBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:CopyObject
+                Resource: !Sub '${QuarantineBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                  - dynamodb:GetItem
+                  - dynamodb:DeleteItem
+                Resource:
+                  - !GetAtt FileTrackingTable.Arn
+                  - !Sub '$arn:aws:dynamodb:us-east-1:804450520964:table/ndjson-parquet-sqs-file-tracking/index/*'
+              - Effect: Allow
+                Action:
+                  - glue:StartJobRun
+                Resource: !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:job/${ProjectName}-streaming-processor'
+
+  ControlPlaneRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-control-plane-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ControlPlanePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - glue:GetJobRun
+                  - glue:GetJob
+                Resource:
+                  - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:job/${ProjectName}-streaming-processor'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub '$arn:aws:s3:::ndjson-manifests-dev-804450520964/*'
+              - Effect: Allow
+                Action:
+                  - dynamodb:UpdateItem
+                  - dynamodb:PutItem
+                  - dynamodb:Query
+                  - dynamodb:GetItem
+                Resource:
+                  # - !GetAtt FileTrackingTable.Arn
+                  - !Sub '$arn:aws:dynamodb:us-east-1:804450520964:table/ndjson-parquet-sqs-file-trackingindex/*'
+                  # - !GetAtt MetricsTable.Arn
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref AlertTopic
+
+  GlueJobRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-glue-job-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: GlueJobS3Policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  # - !GetAtt InputBucket.Arn
+                  - !Sub '$arn:aws:s3:::ndjson-input-dev-804450520964/*'
+                  # - !GetAtt ManifestBucket.Arn
+                  - !Sub '$arn:aws:s3:::ndjson-manifests-dev-804450520964/*'
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:GetObject
+                Resource:
+                  - !Sub '$arn:aws:s3:::parquet-output-dev-804450520964/*'
+                  - !Sub '$arn:aws:s3:::ndjson-manifests-dev-804450520964/checkpoints/*'
+                  - !Sub '$arn:aws:s3:::ndjson-manifests-dev-804450520964/spark-logs/*'
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: '*'
+
+  # ==================== LAMBDA FUNCTIONS ====================
+  

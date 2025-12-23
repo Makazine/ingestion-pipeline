@@ -1,0 +1,42 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CloudWatchLogsAccess",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": [
+        "arn:aws:logs:*:*:log-group:/aws/lambda/ndjson-parquet-test-data-generator:*"
+      ]
+    },
+    {
+      "Sid": "UploadTestFilesToInputBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:PutObjectAcl",
+        "s3:PutObjectTagging"
+      ],
+      "Resource": [
+        "arn:aws:s3:::ndjson-input-*/*"
+      ]
+    },
+    {
+      "Sid": "ListAndReadInputBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket",
+        "s3:GetBucketLocation",
+        "s3:GetBucketVersioning",
+        "s3:GetBucketNotification"
+      ],
+      "Resource": [
+        "arn:aws:s3:::ndjson-input-*"
+      ]
+    }
+  ]
+}

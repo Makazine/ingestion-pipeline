@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NDJSON to Parquet Pipeline - Architecture Diagram</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            padding: 20px;
+            color: #fff;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        
+        h1 {
+            text-align: center;
+            margin-bottom: 10px;
+            font-size: 2rem;
+            background: linear-gradient(90deg, #00d4ff, #7c3aed);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        .subtitle {
+            text-align: center;
+            color: #8892b0;
+            margin-bottom: 30px;
+            font-size: 1rem;
+        }
+        
+        .architecture {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 20px;
+            margin-bottom: 40px;
+        }
+        
+        .layer {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 16px;
+            padding: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .layer-title {
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            color: #64ffda;
+            margin-bottom: 15px;
+            text-align: center;
+            padding-bottom: 10px;
+            border-bottom: 1px solid rgba(100, 255, 218, 0.3);
+        }
+        
+        .component {
+            background: rgba(255, 255, 255, 0.08);
+            border-radius: 12px;
+            padding: 15px;
+            margin-bottom: 15px;
+            transition: all 0.3s ease;
+            cursor: pointer;
+            border: 1px solid transparent;
+        }
+        
+        .component:hover {
+            transform: translateY(-3px);
+            border-color: rgba(100, 255, 218, 0.5);
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+        }
+        
+        .component-icon {
+            font-size: 2rem;
+            margin-bottom: 10px;
+            text-align: center;
+        }
+        
+        .component-name {
+            font-weight: 600;
+            font-size: 0.95rem;
+            margin-bottom: 8px;
+            text-align: center;
+        }
+        
+        .component-details {
+            font-size: 0.75rem;
+            color: #8892b0;
+            line-height: 1.5;
+        }
+        
+        .component-details li {
+            margin-bottom: 3px;
+            list-style: none;
+        }
+        
+        .component-details li::before {
+            content: "→ ";
+            color: #64ffda;
+        }
+        
+        /* Component Colors */
+        .s3 { border-left: 4px solid #ff9f43; }
+        .sqs { border-left: 4px solid #00d4ff; }
+        .lambda { border-left: 4px solid #ff6b6b; }
+        .glue { border-left: 4px solid #a55eea; }
+        .dynamodb { border-left: 4px solid #26de81; }
+        .eventbridge { border-left: 4px solid #fed330; }
+        .sns { border-left: 4px solid #fd79a8; }
+        .cloudwatch { border-left: 4px solid #74b9ff; }
+        
+        /* Data Flow Section */
+        .data-flow {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 16px;
+            padding: 30px;
+            margin-top: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .flow-title {
+            font-size: 1.2rem;
+            margin-bottom: 25px;
+            color: #64ffda;
+            text-align: center;
+        }
+        
+        .flow-diagram {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+        
+        .flow-step {
+            background: linear-gradient(135deg, rgba(100, 255, 218, 0.1), rgba(124, 58, 237, 0.1));
+            border-radius: 12px;
+            padding: 15px 20px;
+            text-align: center;
+            min-width: 120px;
+            border: 1px solid rgba(100, 255, 218, 0.3);
+        }
+        
+        .flow-step-icon {
+            font-size: 1.5rem;
+            margin-bottom: 8px;
+        }
+        
+        .flow-step-name {
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+        
+        .flow-arrow {
+            color: #64ffda;
+            font-size: 1.5rem;
+        }
+        
+        /* Stats Section */
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 20px;
+            margin-top: 30px;
+        }
+        
+        .stat-card {
+            background: linear-gradient(135deg, rgba(100, 255, 218, 0.1), rgba(124, 58, 237, 0.1));
+            border-radius: 12px;
+            padding: 20px;
+            text-align: center;
+            border: 1px solid rgba(100, 255, 218, 0.2);
+        }
+        
+        .stat-value {
+            font-size: 2rem;
+            font-weight: 700;
+            background: linear-gradient(90deg, #00d4ff, #7c3aed);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        .stat-label {
+            font-size: 0.85rem;
+            color: #8892b0;
+            margin-top: 5px;
+        }
+        
+        /* Legend */
+        .legend {
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            margin-top: 30px;
+            flex-wrap: wrap;
+        }
+        
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.8rem;
+            color: #8892b0;
+        }
+        
+        .legend-color {
+            width: 12px;
+            height: 12px;
+            border-radius: 3px;
+        }
+        
+        @media (max-width: 1200px) {
+            .architecture {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+        
+        @media (max-width: 768px) {
+            .architecture {
+                grid-template-columns: 1fr;
+            }
+            .stats {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🏗️ NDJSON to Parquet Pipeline</h1>
+        <p class="subtitle">SQS + Manifest + Glue Streaming Architecture v1.1.0</p>
+        
+        <!-- Main Architecture -->
+        <div class="architecture">
+            <!-- Data Ingestion Layer -->
+            <div class="layer">
+                <div class="layer-title">📥 Data Ingestion</div>
+                
+                <div class="component s3">
+                    <div class="component-icon">📦</div>
+                    <div class="component-name">S3 Input Bucket</div>
+                    <ul class="component-details">
+                        <li>NDJSON files (3.5MB each)</li>
+                        <li>~200,000 files/hour</li>
+                        <li>Date-prefixed naming</li>
+                        <li>S3 event notifications</li>
+                    </ul>
+                </div>
+                
+                <div class="component sqs">
+                    <div class="component-icon">📮</div>
+                    <div class="component-name">SQS Queue</div>
+                    <ul class="component-details">
+                        <li>~55 messages/second</li>
+                        <li>15 min visibility timeout</li>
+                        <li>14-day retention</li>
+                        <li>Dead Letter Queue</li>
+                    </ul>
+                </div>
+            </div>
+            
+            <!-- Processing Layer -->
+            <div class="layer">
+                <div class="layer-title">⚙️ Processing</div>
+                
+                <div class="component lambda">
+                    <div class="component-icon">λ</div>
+                    <div class="component-name">Manifest Builder</div>
+                    <ul class="component-details">
+                        <li>Validates files (size ±10%)</li>
+                        <li>Groups into 1GB batches</li>
+                        <li>Creates manifest files</li>
+                        <li>Distributed locking</li>
+                    </ul>
+                </div>
+                
+                <div class="component glue">
+                    <div class="component-icon">🔧</div>
+                    <div class="component-name">Glue Streaming</div>
+                    <ul class="component-details">
+                        <li>10 × G.2X workers</li>
+                        <li>24/7 continuous processing</li>
+                        <li>PySpark + Snappy</li>
+                        <li>2-5 min per batch</li>
+                    </ul>
+                </div>
+            </div>
+            
+            <!-- Storage Layer -->
+            <div class="layer">
+                <div class="layer-title">💾 Storage</div>
+                
+                <div class="component dynamodb">
+                    <div class="component-icon">🗄️</div>
+                    <div class="component-name">DynamoDB Tables</div>
+                    <ul class="component-details">
+                        <li>File tracking table</li>
+                        <li>Metrics table</li>
+                        <li>On-demand billing</li>
+                        <li>7-day TTL</li>
+                    </ul>
+                </div>
+                
+                <div class="component s3">
+                    <div class="component-icon">📦</div>
+                    <div class="component-name">S3 Output Bucket</div>
+                    <ul class="component-details">
+                        <li>Parquet format</li>
+                        <li>Date partitioned</li>
+                        <li>128MB target files</li>
+                        <li>Intelligent Tiering</li>
+                    </ul>
+                </div>
+                
+                <div class="component s3">
+                    <div class="component-icon">🚫</div>
+                    <div class="component-name">Quarantine Bucket</div>
+                    <ul class="component-details">
+                        <li>Invalid files</li>
+                        <li>30-day retention</li>
+                        <li>Error metadata</li>
+                    </ul>
+                </div>
+            </div>
+            
+            <!-- Monitoring Layer -->
+            <div class="layer">
+                <div class="layer-title">📊 Monitoring</div>
+                
+                <div class="component lambda">
+                    <div class="component-icon">🎮</div>
+                    <div class="component-name">Control Plane</div>
+                    <ul class="component-details">
+                        <li>State management</li>
+                        <li>Anomaly detection</li>
+                        <li>Cost tracking</li>
+                        <li>File status updates</li>
+                    </ul>
+                </div>
+                
+                <div class="component eventbridge">
+                    <div class="component-icon">⚡</div>
+                    <div class="component-name">EventBridge</div>
+                    <ul class="component-details">
+                        <li>Glue state changes</li>
+                        <li>SUCCEEDED/FAILED</li>
+                        <li>TIMEOUT/STOPPED</li>
+                    </ul>
+                </div>
+                
+                <div class="component cloudwatch">
+                    <div class="component-icon">📈</div>
+                    <div class="component-name">CloudWatch</div>
+                    <ul class="component-details">
+                        <li>Custom metrics</li>
+                        <li>Dashboard</li>
+                        <li>Alarms</li>
+                    </ul>
+                </div>
+                
+                <div class="component sns">
+                    <div class="component-icon">📧</div>
+                    <div class="component-name">SNS Alerts</div>
+                    <ul class="component-details">
+                        <li>Job failures</li>
+                        <li>DLQ messages</li>
+                        <li>Anomalies</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Data Flow Diagram -->
+        <div class="data-flow">
+            <div class="flow-title">📊 Data Flow Pipeline</div>
+            <div class="flow-diagram">
+                <div class="flow-step">
+                    <div class="flow-step-icon">📄</div>
+                    <div class="flow-step-name">NDJSON<br/>Upload</div>
+                </div>
+                <div class="flow-arrow">→</div>
+                <div class="flow-step">
+                    <div class="flow-step-icon">📦</div>
+                    <div class="flow-step-name">S3<br/>Input</div>
+                </div>
+                <div class="flow-arrow">→</div>
+                <div class="flow-step">
+                    <div class="flow-step-icon">📮</div>
+                    <div class="flow-step-name">SQS<br/>Queue</div>
+                </div>
+                <div class="flow-arrow">→</div>
+                <div class="flow-step">
+                    <div class="flow-step-icon">λ</div>
+                    <div class="flow-step-name">Manifest<br/>Builder</div>
+                </div>
+                <div class="flow-arrow">→</div>
+                <div class="flow-step">
+                    <div class="flow-step-icon">📋</div>
+                    <div class="flow-step-name">Manifest<br/>Files</div>
+                </div>
+                <div class="flow-arrow">→</div>
+                <div class="flow-step">
+                    <div class="flow-step-icon">🔧</div>
+                    <div class="flow-step-name">Glue<br/>Streaming</div>
+                </div>
+                <div class="flow-arrow">→</div>
+                <div class="flow-step">
+                    <div class="flow-step-icon">🗂️</div>
+                    <div class="flow-step-name">Parquet<br/>Output</div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Stats -->
+        <div class="stats">
+            <div class="stat-card">
+                <div class="stat-value">700 GB</div>
+                <div class="stat-label">Per Hour Throughput</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">200K</div>
+                <div class="stat-label">Files Per Hour</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">~$15K</div>
+                <div class="stat-label">Monthly Cost</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">2-5 min</div>
+                <div class="stat-label">Batch Latency</div>
+            </div>
+        </div>
+        
+        <!-- Legend -->
+        <div class="legend">
+            <div class="legend-item">
+                <div class="legend-color" style="background: #ff9f43;"></div>
+                <span>S3 Storage</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #00d4ff;"></div>
+                <span>SQS Queue</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #ff6b6b;"></div>
+                <span>Lambda</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #a55eea;"></div>
+                <span>Glue</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #26de81;"></div>
+                <span>DynamoDB</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #fed330;"></div>
+                <span>EventBridge</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #74b9ff;"></div>
+                <span>CloudWatch</span>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

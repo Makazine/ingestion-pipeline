@@ -1,0 +1,117 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  IAM Role and Policy for Test Data Generator Lambda Function
+  Grants permissions to generate and upload test NDJSON files to S3 input bucket
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: ndjson-parquet
+    Description: Project name for resource naming
+
+  InputBucketName:
+    Type: String
+    Description: Name of the S3 input bucket where test files will be uploaded
+
+Resources:
+  # IAM Role for Test Data Generator Lambda
+  TestDataGeneratorLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-test-data-generator-role'
+      Description: Execution role for Test Data Generator Lambda function
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        # Basic Lambda execution permissions (CloudWatch Logs)
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-test-data-generator-role'
+        - Key: Purpose
+          Value: TestDataGeneration
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # Custom Policy for S3 Access
+  TestDataGeneratorS3Policy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub '${ProjectName}-test-data-generator-s3-policy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Permission to upload test files to input bucket
+          - Sid: UploadTestFilesToInputBucket
+            Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:PutObjectAcl
+              - s3:PutObjectTagging
+            Resource:
+              - !Sub 'arn:aws:s3:::${InputBucketName}/*'
+
+          # Permission to list bucket contents (optional, for validation)
+          - Sid: ListInputBucket
+            Effect: Allow
+            Action:
+              - s3:ListBucket
+              - s3:GetBucketLocation
+            Resource:
+              - !Sub 'arn:aws:s3:::${InputBucketName}'
+
+          # Permission to read bucket properties
+          - Sid: GetBucketProperties
+            Effect: Allow
+            Action:
+              - s3:GetBucketVersioning
+              - s3:GetBucketNotification
+            Resource:
+              - !Sub 'arn:aws:s3:::${InputBucketName}'
+      Roles:
+        - !Ref TestDataGeneratorLambdaRole
+
+  # Optional: CloudWatch Logs Policy (if you need custom log groups)
+  TestDataGeneratorLogsPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub '${ProjectName}-test-data-generator-logs-policy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: CreateAndWriteToLogGroup
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource:
+              - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ProjectName}-test-data-generator:*'
+      Roles:
+        - !Ref TestDataGeneratorLambdaRole
+
+Outputs:
+  TestDataGeneratorRoleArn:
+    Description: ARN of the Test Data Generator Lambda execution role
+    Value: !GetAtt TestDataGeneratorLambdaRole.Arn
+    Export:
+      Name: !Sub '${ProjectName}-test-data-generator-role-arn'
+
+  TestDataGeneratorRoleName:
+    Description: Name of the Test Data Generator Lambda execution role
+    Value: !Ref TestDataGeneratorLambdaRole
+    Export:
+      Name: !Sub '${ProjectName}-test-data-generator-role-name'
+
+  S3PolicyName:
+    Description: Name of the S3 access policy
+    Value: !Ref TestDataGeneratorS3Policy
+
+  InputBucketPermissions:
+    Description: Bucket where Lambda can upload test files
+    Value: !Ref InputBucketName

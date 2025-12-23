@@ -1,0 +1,248 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Complete Test Data Generator Lambda Deployment
+  Includes Lambda function, IAM role, and CloudWatch resources
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: ndjson-parquet
+    Description: Project name for resource naming
+
+  InputBucketName:
+    Type: String
+    Description: Name of the S3 input bucket where test files will be uploaded
+
+  LambdaCodeS3Bucket:
+    Type: String
+    Description: S3 bucket containing the Lambda deployment package
+
+  LambdaCodeS3Key:
+    Type: String
+    Default: lambda/test-data-generator.zip
+    Description: S3 key for the Lambda deployment package
+
+  TargetFileSizeMB:
+    Type: Number
+    Default: 3.5
+    MinValue: 0.1
+    MaxValue: 100
+    Description: Target size for generated test files in MB
+
+  FilesPerInvocation:
+    Type: Number
+    Default: 10
+    MinValue: 1
+    MaxValue: 1000
+    Description: Number of files to generate per Lambda invocation
+
+  LambdaTimeout:
+    Type: Number
+    Default: 300
+    MinValue: 60
+    MaxValue: 900
+    Description: Lambda function timeout in seconds
+
+  LambdaMemorySize:
+    Type: Number
+    Default: 512
+    AllowedValues: [128, 256, 512, 1024, 2048, 3008]
+    Description: Lambda function memory size in MB
+
+Resources:
+  # ==========================================
+  # IAM Role and Policies
+  # ==========================================
+
+  TestDataGeneratorLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-test-data-generator-role'
+      Description: Execution role for Test Data Generator Lambda function
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-test-data-generator-role'
+        - Key: Purpose
+          Value: TestDataGeneration
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  TestDataGeneratorS3Policy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub '${ProjectName}-test-data-generator-s3-policy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: UploadTestFilesToInputBucket
+            Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:PutObjectAcl
+              - s3:PutObjectTagging
+            Resource:
+              - !Sub 'arn:aws:s3:::${InputBucketName}/*'
+
+          - Sid: ListInputBucket
+            Effect: Allow
+            Action:
+              - s3:ListBucket
+              - s3:GetBucketLocation
+            Resource:
+              - !Sub 'arn:aws:s3:::${InputBucketName}'
+      Roles:
+        - !Ref TestDataGeneratorLambdaRole
+
+  # ==========================================
+  # CloudWatch Log Group
+  # ==========================================
+
+  TestDataGeneratorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${ProjectName}-test-data-generator'
+      RetentionInDays: 7
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-test-data-generator-logs'
+        - Key: Purpose
+          Value: TestDataGeneration
+
+  # ==========================================
+  # Lambda Function
+  # ==========================================
+
+  TestDataGeneratorFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: TestDataGeneratorLogGroup
+    Properties:
+      FunctionName: !Sub '${ProjectName}-test-data-generator'
+      Description: Generates test NDJSON files and uploads to S3 input bucket
+      Runtime: python3.11
+      Handler: lambda_test_data_generator.lambda_handler
+      Role: !GetAtt TestDataGeneratorLambdaRole.Arn
+      Timeout: !Ref LambdaTimeout
+      MemorySize: !Ref LambdaMemorySize
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Ref LambdaCodeS3Key
+      Environment:
+        Variables:
+          INPUT_BUCKET: !Ref InputBucketName
+          TARGET_FILE_SIZE_MB: !Ref TargetFileSizeMB
+          FILES_PER_INVOCATION: !Ref FilesPerInvocation
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-test-data-generator'
+        - Key: Purpose
+          Value: TestDataGeneration
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # ==========================================
+  # CloudWatch Alarms (Optional)
+  # ==========================================
+
+  TestDataGeneratorErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-test-data-generator-errors'
+      AlarmDescription: Alert when Test Data Generator Lambda has errors
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref TestDataGeneratorFunction
+      TreatMissingData: notBreaching
+
+  TestDataGeneratorThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-test-data-generator-throttles'
+      AlarmDescription: Alert when Test Data Generator Lambda is throttled
+      MetricName: Throttles
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref TestDataGeneratorFunction
+      TreatMissingData: notBreaching
+
+  # ==========================================
+  # Lambda Permissions (for EventBridge/Manual Invocation)
+  # ==========================================
+
+  TestDataGeneratorInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref TestDataGeneratorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !Sub 'arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/*'
+
+Outputs:
+  # Lambda Function Outputs
+  TestDataGeneratorFunctionArn:
+    Description: ARN of the Test Data Generator Lambda function
+    Value: !GetAtt TestDataGeneratorFunction.Arn
+    Export:
+      Name: !Sub '${ProjectName}-test-data-generator-function-arn'
+
+  TestDataGeneratorFunctionName:
+    Description: Name of the Test Data Generator Lambda function
+    Value: !Ref TestDataGeneratorFunction
+    Export:
+      Name: !Sub '${ProjectName}-test-data-generator-function-name'
+
+  # IAM Role Outputs
+  TestDataGeneratorRoleArn:
+    Description: ARN of the Test Data Generator Lambda execution role
+    Value: !GetAtt TestDataGeneratorLambdaRole.Arn
+    Export:
+      Name: !Sub '${ProjectName}-test-data-generator-role-arn'
+
+  # CloudWatch Log Group
+  LogGroupName:
+    Description: CloudWatch Log Group for Test Data Generator
+    Value: !Ref TestDataGeneratorLogGroup
+
+  # Configuration
+  InputBucket:
+    Description: S3 bucket where test files will be uploaded
+    Value: !Ref InputBucketName
+
+  TargetFileSize:
+    Description: Target file size in MB
+    Value: !Ref TargetFileSizeMB
+
+  FilesPerInvocation:
+    Description: Number of files generated per invocation
+    Value: !Ref FilesPerInvocation
+
+  # Testing Commands
+  TestCommand:
+    Description: AWS CLI command to test the Lambda function
+    Value: !Sub |
+      aws lambda invoke \
+        --function-name ${TestDataGeneratorFunction} \
+        --payload '{"file_count": 5, "date_prefix": "2025-12-23"}' \
+        --region ${AWS::Region} \
+        response.json && cat response.json | jq .

@@ -1,0 +1,138 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'SQS + Manifest + Glue Streaming NDJSON to Parquet Pipeline (v1.1.0 - Updated with code review fixes)'
+
+# Version 1.1.0 Changes:
+# - Added DeletionPolicy and UpdateReplacePolicy to S3 buckets
+# - Added configurable file validation environment variables
+# - Added lock TTL configuration
+# - Enhanced alarms and monitoring
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: ndjson-parquet-sqs
+    Description: Project name for resource naming
+  
+  InputBucketName:
+    Type: String
+    Description: S3 bucket for incoming NDJSON files
+    Default: ndjson-input-sqs
+  
+  ManifestBucketName:
+    Type: String
+    Description: S3 bucket for manifest files
+    Default: ndjson-manifests
+  
+  OutputBucketName:
+    Type: String
+    Description: S3 bucket for output Parquet files
+    Default: parquet-output-sqs
+  
+  QuarantineBucketName:
+    Type: String
+    Description: S3 bucket for quarantined files
+    Default: ndjson-quarantine
+  
+  MaxBatchSizeGB:
+    Type: Number
+    Default: 1.0
+    Description: Maximum manifest batch size in GB
+  
+  ExpectedFileSizeMB:
+    Type: Number
+    Default: 3.5
+    Description: Expected NDJSON file size in MB
+  
+  SizeTolerancePercent:
+    Type: Number
+    Default: 10
+    Description: Allowed variance in file size (percent)
+  
+  GlueWorkerType:
+    Type: String
+    Default: G.2X
+    AllowedValues: [G.1X, G.2X, G.4X, G.8X]
+    Description: Glue worker type
+  
+  GlueNumberOfWorkers:
+    Type: Number
+    Default: 10
+    Description: Number of Glue workers for streaming job
+  
+  AlertEmail:
+    Type: String
+    Description: Email address for alerts
+    Default: magzine323@gmail.com
+
+Resources:
+  # ==================== S3 BUCKETS ====================
+  
+
+  # ==================== SQS QUEUES ====================
+  
+
+  # ==================== DYNAMODB TABLES ====================
+  
+  FileTrackingTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub '${ProjectName}-file-tracking'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: date_prefix
+          AttributeType: S
+        - AttributeName: file_name
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+      KeySchema:
+        - AttributeName: date_prefix
+          KeyType: HASH
+        - AttributeName: file_name
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: status-index
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+            - AttributeName: date_prefix
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      TimeToLiveSpecification:
+        Enabled: true
+        AttributeName: ttl
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  MetricsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ProjectName}-metrics'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: metric_date
+          AttributeType: S
+        - AttributeName: metric_type
+          AttributeType: S
+      KeySchema:
+        - AttributeName: metric_date
+          KeyType: HASH
+        - AttributeName: metric_type
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        Enabled: true
+        AttributeName: ttl
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ==================== IAM ROLES ====================
+  

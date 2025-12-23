@@ -1,0 +1,85 @@
+---
+title: NDJSON to Parquet Pipeline - Architecture Diagram
+---
+flowchart TB
+    subgraph INGESTION["📥 DATA INGESTION LAYER"]
+        direction TB
+        S3Input["📦 S3 Input Bucket\n━━━━━━━━━━━━━━━\nNDJSON Files (3.5MB)\n~200,000 files/hour\nDate-prefixed naming"]
+        
+        SQS["📮 SQS Queue\n━━━━━━━━━━━━━━━\n• 55 messages/sec\n• 15 min visibility\n• 14-day retention\n• Long polling (20s)"]
+        
+        DLQ["☠️ Dead Letter Queue\n━━━━━━━━━━━━━━━\n• Failed messages (3x)\n• 14-day retention\n• Alarm on messages"]
+    end
+    
+    subgraph PROCESSING["⚙️ PROCESSING LAYER"]
+        direction TB
+        Lambda1["λ Manifest Builder\n━━━━━━━━━━━━━━━\n• Validates files\n• Groups into 1GB batches\n• Distributed locking\n• Tracks in DynamoDB\n━━━━━━━━━━━━━━━\n512MB | 3min timeout"]
+        
+        S3Manifest["📋 S3 Manifest Bucket\n━━━━━━━━━━━━━━━\nmanifests/yyyy-mm-dd/\nbatch-NNNN.json\n~286 files per batch"]
+        
+        Quarantine["🚫 S3 Quarantine\n━━━━━━━━━━━━━━━\nInvalid files\n30-day retention"]
+        
+        Glue["🔧 Glue Streaming Job\n━━━━━━━━━━━━━━━━━\n• 10 × G.2X workers\n• PySpark + Snappy\n• 24/7 continuous\n• 30s trigger interval\n• Checkpoint recovery\n━━━━━━━━━━━━━━━━━\n2-5 min per batch"]
+    end
+    
+    subgraph STORAGE["💾 STORAGE LAYER"]
+        direction TB
+        DDB["🗄️ DynamoDB\n━━━━━━━━━━━━━━━\nFile Tracking Table\n• PK: date_prefix\n• SK: file_name\n• GSI: status-index\n• TTL: 7 days\n━━━━━━━━━━━━━━━\nMetrics Table\n• Job run stats\n• Cost tracking"]
+        
+        S3Output["📦 S3 Output Bucket\n━━━━━━━━━━━━━━━\nmerged-parquet-yyyy-mm-dd/\n• Parquet format\n• Snappy compression\n• 128MB target files\n• Intelligent Tiering"]
+    end
+    
+    subgraph MONITORING["📊 MONITORING LAYER"]
+        direction TB
+        EB["⚡ EventBridge\n━━━━━━━━━━━━━━━\nGlue State Changes\n• SUCCEEDED\n• FAILED\n• TIMEOUT\n• STOPPED"]
+        
+        Lambda2["λ Control Plane\n━━━━━━━━━━━━━━━\n• State management\n• Anomaly detection\n• Cost tracking\n• Status updates\n━━━━━━━━━━━━━━━\n256MB | 1min timeout"]
+        
+        CW["📈 CloudWatch\n━━━━━━━━━━━━━━━\n• Custom metrics\n• Dashboard\n• Alarms\n• Log groups"]
+        
+        SNS["📧 SNS Alerts\n━━━━━━━━━━━━━━━\n• Job failures\n• DLQ messages\n• Anomalies\n• Cost alerts"]
+    end
+    
+    %% Data Flow Connections
+    S3Input -->|"S3 Event\nNotification"| SQS
+    SQS -->|"Poll messages\n(batch: 10)"| Lambda1
+    SQS -->|"3x failures"| DLQ
+    
+    Lambda1 -->|"Track files"| DDB
+    Lambda1 -->|"Create manifests\n(1GB batches)"| S3Manifest
+    Lambda1 -->|"Invalid files"| Quarantine
+    
+    S3Manifest -->|"Trigger\nprocessing"| Glue
+    Glue -->|"Read\nNDJSON"| S3Input
+    Glue -->|"Write\nParquet"| S3Output
+    
+    %% Monitoring Flow
+    Glue -->|"State\nchanges"| EB
+    EB -->|"Trigger"| Lambda2
+    Lambda2 -->|"Update\nstatus"| DDB
+    Lambda2 -->|"Publish\nmetrics"| CW
+    Lambda2 -->|"Send\nalerts"| SNS
+    
+    DLQ -.->|"Alarm"| CW
+    CW -.->|"Alert"| SNS
+    
+    %% Styling
+    classDef s3 fill:#ff9f43,stroke:#e17055,color:#fff,stroke-width:2px
+    classDef sqs fill:#00cec9,stroke:#00b894,color:#fff,stroke-width:2px
+    classDef lambda fill:#fd79a8,stroke:#e84393,color:#fff,stroke-width:2px
+    classDef glue fill:#a29bfe,stroke:#6c5ce7,color:#fff,stroke-width:2px
+    classDef dynamodb fill:#55efc4,stroke:#00b894,color:#2d3436,stroke-width:2px
+    classDef eventbridge fill:#fdcb6e,stroke:#f39c12,color:#2d3436,stroke-width:2px
+    classDef cloudwatch fill:#74b9ff,stroke:#0984e3,color:#fff,stroke-width:2px
+    classDef sns fill:#fab1a0,stroke:#e17055,color:#2d3436,stroke-width:2px
+    classDef dlq fill:#ff7675,stroke:#d63031,color:#fff,stroke-width:2px
+    
+    class S3Input,S3Manifest,S3Output,Quarantine s3
+    class SQS sqs
+    class Lambda1,Lambda2 lambda
+    class Glue glue
+    class DDB dynamodb
+    class EB eventbridge
+    class CW cloudwatch
+    class SNS sns
+    class DLQ dlq

@@ -1,0 +1,42 @@
+aws cloudformation create-stack \
+  --stack-name ndjson-parquet-sqs \
+  --template-body file://cloudformation-sqs-manifest.yaml \
+  --parameters file://parameters.json \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --tags Key=Environment,Value=Production Key=Team,Value=DataEngineering
+
+
+$ aws cloudformation create-stack   --stack-name ndjson-parquet-sqs   --template-body file://cloudformation-sqs-manifest.yaml   --parameters file://parameters.json   --capabilities CAPABILITY_NAMED_IAM   --tags Key=Environment,Value=Production Key=Team,Value=DataEngineering
+
+Error parsing parameter '--parameters': Invalid JSON: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+JSON received: {
+
+ ParameterKey, 
+ ParameterValue, 
+ UsePreviousValue, 
+ ResolvedValue
+
+Parameter validation failed:
+Unknown parameter in Parameters[0]: "ProjectName", must be one of: ParameterKey, ParameterValue, UsePreviousValue, ResolvedValue
+Unknown parameter in Parameters[0]: "InputBucketName", must be one of: ParameterKey, ParameterValue, UsePreviousValue, ResolvedValue
+Unknown parameter in Parameters[0]: "ManifestBucketName", must be one of: ParameterKey, ParameterValue, UsePreviousValue, ResolvedValue
+Unknown parameter in Parameters[0]: "OutputBucketName", must be one of: ParameterKey, ParameterValue, UsePreviousValue, ResolvedValue
+Unknown parameter in Parameters[0]: "QuarantineBucketName", must be one of: ParameterKey, ParameterValue, UsePreviousValue, ResolvedValue
+Unknown parameter in Parameters[0]: "MaxBatchSizeGB", must be one of: ParameterKey, ParameterValue, UsePreviousValue, ResolvedValue
+Unknown parameter in Parameters[0]: "GlueWorkerType", must be one of: ParameterKey, ParameterValue, UsePreviousValue, ResolvedValue
+Unknown parameter in Parameters[0]: "GlueNumberOfWorkers", must be one of: ParameterKey, ParameterValue, UsePreviousValue, ResolvedValue
+Unknown parameter in Parameters[0]: "AlertEmail", must be one of: ParameterKey, ParameterValue, UsePreviousValue, ResolvedValue
+
+aws cloudformation create-stack \
+  --stack-name ndjson-parquet-sqs \
+  --template-body file://cloudformation-sqs-manifest.yaml \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --tags Key=Environment,Value=Production Key=Team,Value=DataEngineering
+
+  aws cloudformation delete-stack --stack-name ndjson-parquet-sqs
+
+ndjson-quarantine-804450520964
+ndjson-manifests-804450520964
+ndjson-parquet-sqs-logs-804450520964
+parquet-output-sqs-804450520964
+AWS::DynamoDB::Table
