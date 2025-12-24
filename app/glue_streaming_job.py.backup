@@ -1,0 +1,579 @@
+"""
+AWS Glue Streaming Job: NDJSON to Parquet Converter (Manifest-Based)
+======================================================================
+
+This Glue streaming job continuously processes manifest files containing
+batches of NDJSON files, converts them to Parquet format with date-based
+partitioning, and writes to S3.
+
+Author: Data Engineering Team
+Version: 1.1.0 (Updated with code review fixes)
+
+Changes in 1.1.0:
+- Fixed bare exception to catch SystemExit specifically
+- Added checkpoint cleanup recommendation comments
+- Improved logging with more context
+- Added graceful shutdown handling
+- Enhanced error messages
+"""
+
+import sys
+import json
+import logging
+import signal
+import time
+from datetime import datetime
+from typing import List, Dict, Optional
+
+import boto3
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import functions as F
+from pyspark.sql.types import StringType
+
+# Initialize logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# AWS clients
+s3_client = boto3.client('s3')
+cloudwatch = boto3.client('cloudwatch')
+
+# Graceful shutdown flag
+shutdown_requested = False
+
+
+def signal_handler(signum, frame):
+    """Handle shutdown signals gracefully."""
+    global shutdown_requested
+    logger.info(f"Received signal {signum}, initiating graceful shutdown...")
+    shutdown_requested = True
+
+
+# Register signal handlers for graceful shutdown
+signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
+
+
+class ManifestProcessor:
+    """
+    Process manifest files and convert NDJSON to Parquet.
+    
+    Reads manifest files that contain lists of NDJSON files to process,
+    merges them, converts to Parquet, and partitions by date.
+    """
+    
+    def __init__(
+        self,
+        spark: SparkSession,
+        glue_context: GlueContext,
+        manifest_bucket: str,
+        output_bucket: str,
+        compression: str = 'snappy'
+    ):
+        """
+        Initialize the processor.
+        
+        Args:
+            spark: SparkSession instance
+            glue_context: GlueContext instance
+            manifest_bucket: S3 bucket containing manifest files
+            output_bucket: S3 bucket for output Parquet files
+            compression: Parquet compression codec
+        """
+        self.spark = spark
+        self.glue_context = glue_context
+        self.manifest_bucket = manifest_bucket
+        self.output_bucket = output_bucket
+        self.compression = compression
+        
+        # Configure Spark for optimal Parquet writing
+        self._configure_spark()
+        
+        # Statistics tracking
+        self.stats = {
+            'batches_processed': 0,
+            'records_processed': 0,
+            'errors': 0,
+            'start_time': datetime.utcnow().isoformat()
+        }
+        
+        logger.info(
+            f"Initialized processor - Manifests: {manifest_bucket}, "
+            f"Output: {output_bucket}, Compression: {compression}"
+        )
+    
+    def _configure_spark(self):
+        """Configure Spark settings for optimal performance."""
+        # Enable adaptive query execution
+        self.spark.conf.set("spark.sql.adaptive.enabled", "true")
+        self.spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")
+        
+        # Parquet settings
+        self.spark.conf.set("spark.sql.parquet.compression.codec", self.compression)
+        self.spark.conf.set("spark.sql.parquet.mergeSchema", "false")
+        self.spark.conf.set("spark.sql.parquet.filterPushdown", "true")
+        
+        # Optimize file sizes - target 128MB per file
+        self.spark.conf.set("spark.sql.files.maxPartitionBytes", "134217728")
+        
+        # Set shuffle partitions for 1GB batches with 10 workers
+        # ~286 files per batch, good parallelization
+        self.spark.conf.set("spark.sql.shuffle.partitions", "100")
+
+        # NOTE: spark.speculation cannot be set here as SparkContext is already initialized
+        # To enable speculative execution, add these as Glue job parameters:
+        # --conf spark.speculation=true --conf spark.speculation.multiplier=2
+
+        # S3 optimization
+        self.spark.conf.set("spark.hadoop.fs.s3a.fast.upload", "true")
+        self.spark.conf.set("spark.hadoop.fs.s3a.multipart.size", "104857600")  # 100MB
+        
+        logger.info("Spark configuration completed")
+    
+    def process_manifest_stream(self, manifest_path: str = None):
+        """
+        Process manifests from S3 in streaming mode.
+        
+        Args:
+            manifest_path: Optional specific manifest path (for batch mode)
+        """
+        if manifest_path:
+            # Batch mode - process single manifest
+            self._process_single_manifest(manifest_path)
+        else:
+            # Streaming mode - watch for new manifests
+            self._process_manifest_directory()
+    
+    def _process_manifest_directory(self):
+        """
+        Stream manifests from S3 directory.
+        
+        Continuously watches for new manifest files and processes them.
+        
+        NOTE: Checkpoints are stored at s3://{manifest_bucket}/checkpoints/
+        Consider adding an S3 lifecycle policy to clean up old checkpoints:
+        
+        aws s3api put-bucket-lifecycle-configuration \
+          --bucket {manifest_bucket} \
+          --lifecycle-configuration '{
+            "Rules": [{
+              "ID": "CleanupOldCheckpoints",
+              "Filter": {"Prefix": "checkpoints/"},
+              "Status": "Enabled",
+              "Expiration": {"Days": 7}
+            }]
+          }'
+        """
+        logger.info("Starting manifest stream processing")
+        
+        # Watch manifest directory
+        manifest_prefix = f"s3://{self.manifest_bucket}/manifests/"
+        checkpoint_location = f"s3://{self.manifest_bucket}/checkpoints/"
+        
+        logger.info(f"Watching: {manifest_prefix}")
+        logger.info(f"Checkpoints: {checkpoint_location}")
+        
+        # Read manifests as stream
+        manifest_stream_df = (
+            self.spark.readStream
+            .format("text")
+            .option("maxFilesPerTrigger", 1)  # Process one manifest at a time
+            .option("latestFirst", "false")   # Process in order
+            .load(manifest_prefix)
+        )
+        
+        # Process each manifest
+        query = (
+            manifest_stream_df.writeStream
+            .foreachBatch(self._process_manifest_batch)
+            .option("checkpointLocation", checkpoint_location)
+            .trigger(processingTime='30 seconds')  # Check every 30 seconds
+            .start()
+        )
+        
+        logger.info("Manifest stream started")
+        
+        # Wait for termination or shutdown signal
+        while not shutdown_requested:
+            if query.isActive:
+                # Log progress periodically
+                progress = query.lastProgress
+                if progress:
+                    logger.info(f"Stream progress: {json.dumps(progress, default=str)}")
+                time.sleep(60)  # Check every minute
+            else:
+                logger.warning("Query is no longer active")
+                break
+        
+        if shutdown_requested:
+            logger.info("Shutdown requested, stopping query...")
+            query.stop()
+        
+        query.awaitTermination()
+        logger.info(f"Stream processing ended. Stats: {json.dumps(self.stats)}")
+    
+    def _process_manifest_batch(self, batch_df: DataFrame, batch_id: int):
+        """
+        Process a batch of manifests.
+        
+        Args:
+            batch_df: DataFrame containing manifest file paths
+            batch_id: Batch ID
+        """
+        global shutdown_requested
+        
+        if shutdown_requested:
+            logger.info(f"Skipping batch {batch_id} due to shutdown request")
+            return
+        
+        logger.info(f"Processing manifest batch {batch_id}")
+        batch_start_time = time.time()
+        
+        # Get manifest paths from batch
+        manifest_rows = batch_df.collect()
+        
+        if not manifest_rows:
+            logger.info(f"Batch {batch_id}: No manifests to process")
+            return
+        
+        for row in manifest_rows:
+            manifest_content = row.value
+            try:
+                manifest = json.loads(manifest_content)
+                self._process_manifest(manifest, f"batch_{batch_id}")
+                self.stats['batches_processed'] += 1
+            except json.JSONDecodeError as e:
+                logger.error(f"Invalid JSON in manifest batch {batch_id}: {str(e)}")
+                self.stats['errors'] += 1
+            except Exception as e:
+                logger.error(f"Error processing manifest in batch {batch_id}: {str(e)}")
+                self.stats['errors'] += 1
+        
+        batch_duration = time.time() - batch_start_time
+        logger.info(f"Batch {batch_id} completed in {batch_duration:.2f} seconds")
+        
+        # Publish batch metrics
+        self._publish_batch_metrics(batch_id, batch_duration)
+    
+    def _process_single_manifest(self, manifest_path: str):
+        """
+        Process a single manifest file.
+        
+        Args:
+            manifest_path: S3 path to manifest file
+        """
+        logger.info(f"Processing single manifest: {manifest_path}")
+        
+        try:
+            # Parse S3 path
+            bucket, key = self._parse_s3_path(manifest_path)
+            
+            # Read manifest
+            response = s3_client.get_object(Bucket=bucket, Key=key)
+            manifest = json.loads(response['Body'].read().decode('utf-8'))
+            
+            # Extract date prefix from manifest path
+            # manifests/2025-12-21/batch-0001-timestamp.json
+            path_parts = key.split('/')
+            date_prefix = path_parts[1] if len(path_parts) > 1 else datetime.utcnow().strftime('%Y-%m-%d')
+            
+            # Process the manifest
+            self._process_manifest(manifest, date_prefix)
+            
+        except Exception as e:
+            logger.error(f"Error processing manifest {manifest_path}: {str(e)}")
+            raise
+    
+    def _process_manifest(self, manifest: Dict, date_prefix: str):
+        """
+        Process a manifest and convert NDJSON to Parquet.
+        
+        Args:
+            manifest: Manifest dictionary with file locations
+            date_prefix: Date prefix for partitioning (yyyy-mm-dd)
+        """
+        process_start = time.time()
+        
+        try:
+            # Extract file paths from manifest
+            file_paths = []
+            for location in manifest.get('fileLocations', []):
+                for uri in location.get('URIPrefixes', []):
+                    file_paths.append(uri)
+            
+            if not file_paths:
+                logger.warning(f"No files in manifest for {date_prefix}")
+                return
+            
+            logger.info(f"Processing {len(file_paths)} files for {date_prefix}")
+            
+            # Read and merge NDJSON files
+            df = self._read_and_merge_ndjson(file_paths)
+            
+            if df is None or df.isEmpty():
+                logger.warning(f"No data read from files for {date_prefix}")
+                return
+            
+            # Cast all columns to string
+            df = self._cast_all_to_string(df)
+            
+            # Generate output path
+            output_path = self._generate_output_path(date_prefix)
+            
+            # Write Parquet
+            record_count = self._write_parquet(df, output_path)
+            
+            self.stats['records_processed'] += record_count
+            
+            process_duration = time.time() - process_start
+            logger.info(
+                f"Completed {date_prefix}: {record_count} records -> {output_path} "
+                f"in {process_duration:.2f}s"
+            )
+            
+        except Exception as e:
+            logger.error(f"Error processing manifest for {date_prefix}: {str(e)}")
+            self.stats['errors'] += 1
+            raise
+    
+    def _read_and_merge_ndjson(self, file_paths: List[str]) -> Optional[DataFrame]:
+        """
+        Read multiple NDJSON files and merge into single DataFrame.
+        
+        Args:
+            file_paths: List of S3 paths to NDJSON files
+            
+        Returns:
+            Merged DataFrame or None on error
+        """
+        try:
+            logger.info(f"Reading {len(file_paths)} NDJSON files")
+            read_start = time.time()
+            
+            # Read all files in one operation for efficiency
+            df = self.spark.read.json(file_paths, multiLine=False)
+            
+            # Add metadata columns
+            df = df.withColumn("_processing_timestamp", F.current_timestamp())
+            df = df.withColumn("_source_file", F.input_file_name())
+            
+            record_count = df.count()
+            read_duration = time.time() - read_start
+            
+            logger.info(f"Successfully read {record_count} records in {read_duration:.2f}s")
+            
+            return df
+            
+        except Exception as e:
+            logger.error(f"Failed to read NDJSON files: {str(e)}")
+            raise
+    
+    def _cast_all_to_string(self, df: DataFrame) -> DataFrame:
+        """
+        Cast all DataFrame columns to string type.
+        
+        Args:
+            df: Input DataFrame
+            
+        Returns:
+            DataFrame with all columns as strings
+        """
+        logger.info("Casting all columns to string type")
+        
+        # Use list comprehension for efficient column casting
+        string_columns = [
+            F.col(col_name).cast(StringType()).alias(col_name)
+            for col_name in df.columns
+        ]
+        
+        return df.select(string_columns)
+    
+    def _generate_output_path(self, date_prefix: str) -> str:
+        """
+        Generate output S3 path with partition structure.
+        
+        Format: merged-parquet-yyyy-mm-dd/
+        
+        Args:
+            date_prefix: Date prefix (yyyy-mm-dd)
+            
+        Returns:
+            Complete S3 path for output
+        """
+        partition_dir = f"merged-parquet-{date_prefix}"
+        return f"s3://{self.output_bucket}/{partition_dir}/"
+    
+    def _write_parquet(self, df: DataFrame, output_path: str) -> int:
+        """
+        Write DataFrame to Parquet format.
+        
+        Uses Snappy compression and optimizes for S3 performance.
+        
+        Args:
+            df: DataFrame to write
+            output_path: S3 output path
+            
+        Returns:
+            Number of records written
+        """
+        try:
+            write_start = time.time()
+            
+            # Cache for count and write
+            df.cache()
+            record_count = df.count()
+            
+            logger.info(f"Writing {record_count} records to {output_path}")
+            
+            # Calculate optimal partitions
+            # Target 128MB per file, assume 1KB avg record size
+            estimated_size_mb = record_count / 1024
+            num_partitions = max(int(estimated_size_mb / 128), 1)
+            
+            logger.info(f"Using {num_partitions} output partitions")
+            
+            # Coalesce to reduce number of output files
+            df_coalesced = df.coalesce(num_partitions)
+            
+            # Write with Parquet compression
+            df_coalesced.write.mode('append').parquet(
+                output_path,
+                compression=self.compression
+            )
+            
+            # Unpersist cache
+            df.unpersist()
+            
+            write_duration = time.time() - write_start
+            logger.info(f"Successfully wrote {record_count} records in {write_duration:.2f}s")
+            
+            return record_count
+            
+        except Exception as e:
+            logger.error(f"Failed to write Parquet: {str(e)}")
+            raise
+    
+    def _publish_batch_metrics(self, batch_id: int, duration: float):
+        """Publish batch processing metrics to CloudWatch."""
+        try:
+            cloudwatch.put_metric_data(
+                Namespace='GlueStreaming',
+                MetricData=[
+                    {
+                        'MetricName': 'BatchProcessingTime',
+                        'Value': duration,
+                        'Unit': 'Seconds',
+                        'Dimensions': [
+                            {'Name': 'JobName', 'Value': 'ndjson-parquet-streaming'}
+                        ]
+                    },
+                    {
+                        'MetricName': 'BatchesProcessed',
+                        'Value': 1,
+                        'Unit': 'Count',
+                        'Dimensions': [
+                            {'Name': 'JobName', 'Value': 'ndjson-parquet-streaming'}
+                        ]
+                    }
+                ]
+            )
+        except Exception as e:
+            logger.warning(f"Failed to publish batch metrics: {str(e)}")
+    
+    @staticmethod
+    def _parse_s3_path(s3_path: str) -> tuple:
+        """Parse S3 path into bucket and key."""
+        path_parts = s3_path.replace('s3://', '').split('/', 1)
+        return path_parts[0], path_parts[1]
+
+
+def main():
+    """
+    Main entry point for Glue job.
+    
+    Supports both batch and streaming modes:
+    - Batch: Process a specific manifest file
+    - Streaming: Continuously watch for new manifests
+    """
+    # Parse required job arguments
+    args = getResolvedOptions(
+        sys.argv,
+        [
+            'JOB_NAME',
+            'MANIFEST_BUCKET',
+            'OUTPUT_BUCKET',
+            'COMPRESSION_TYPE'
+        ]
+    )
+    
+    # Parse optional arguments with proper exception handling
+    # NOTE: getResolvedOptions raises SystemExit (not a generic exception)
+    # when optional arguments are not provided
+    manifest_path = None
+    date_prefix = None
+    
+    try:
+        optional_args = getResolvedOptions(sys.argv, ['MANIFEST_PATH'])
+        manifest_path = optional_args.get('MANIFEST_PATH')
+    except SystemExit:
+        # MANIFEST_PATH not provided, which is fine for streaming mode
+        pass
+    
+    try:
+        optional_args = getResolvedOptions(sys.argv, ['DATE_PREFIX'])
+        date_prefix = optional_args.get('DATE_PREFIX')
+    except SystemExit:
+        # DATE_PREFIX not provided, which is fine
+        pass
+    
+    # Initialize Glue context
+    sc = SparkContext()
+    glue_context = GlueContext(sc)
+    spark = glue_context.spark_session
+    job = Job(glue_context)
+    job.init(args['JOB_NAME'], args)
+    
+    logger.info(f"Starting job: {args['JOB_NAME']}")
+    logger.info(f"Job parameters: {json.dumps(args)}")
+    
+    if manifest_path:
+        logger.info(f"Running in BATCH mode: {manifest_path}")
+    else:
+        logger.info("Running in STREAMING mode")
+    
+    try:
+        # Initialize processor
+        processor = ManifestProcessor(
+            spark=spark,
+            glue_context=glue_context,
+            manifest_bucket=args['MANIFEST_BUCKET'],
+            output_bucket=args['OUTPUT_BUCKET'],
+            compression=args.get('COMPRESSION_TYPE', 'snappy')
+        )
+        
+        # Process manifests
+        processor.process_manifest_stream(manifest_path)
+        
+        logger.info("Job completed successfully")
+        logger.info(f"Final stats: {json.dumps(processor.stats)}")
+        
+        # Commit job
+        job.commit()
+        
+    except Exception as e:
+        logger.error(f"Job failed: {str(e)}", exc_info=True)
+        raise
+    finally:
+        # Stop Spark context
+        sc.stop()
+
+
+if __name__ == "__main__":
+    main()

@@ -561,7 +561,7 @@ Resources:
       Role: !GetAtt GlueJobRole.Arn
       GlueVersion: '4.0'
       Command:
-        Name: gluestreaming
+        Name: glueetl
         ScriptLocation: !Sub 's3://${ManifestBucket}/scripts/glue_streaming_job.py'
         PythonVersion: '3'
       DefaultArguments:
