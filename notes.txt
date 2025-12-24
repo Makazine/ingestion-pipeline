@@ -5,6 +5,13 @@ aws cloudformation create-stack \
   --capabilities CAPABILITY_NAMED_IAM \
   --tags Key=Environment,Value=Production Key=Team,Value=DataEngineering
 
+Testing
+aws cloudformation create-stack \
+  --stack-name ndjson-parquet-sqs \
+  --template-body file://cloudformation-sqs-manifest.yaml \
+  --parameters file://parameters.json \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --tags Key=Environment,Value=Production Key=Team,Value=DataEngineering
 
 $ aws cloudformation create-stack   --stack-name ndjson-parquet-sqs   --template-body file://cloudformation-sqs-manifest.yaml   --parameters file://parameters.json   --capabilities CAPABILITY_NAMED_IAM   --tags Key=Environment,Value=Production Key=Team,Value=DataEngineering
 

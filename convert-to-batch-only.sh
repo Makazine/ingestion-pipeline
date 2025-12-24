@@ -1,3 +1,30 @@
+#!/bin/bash
+
+# Convert Glue Job to Batch-Only Mode
+# This removes streaming functionality to prevent accidental 24/7 runs
+
+set -e
+
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+echo -e "${YELLOW}Converting script to batch-only mode...${NC}"
+echo ""
+echo "This will:"
+echo "  1. Comment out streaming functionality"
+echo "  2. Make MANIFEST_PATH required (prevents accidental streaming)"
+echo "  3. Keep all batch processing logic intact"
+echo ""
+
+SCRIPT_FILE="app/glue_streaming_job.py"
+
+# Create backup
+cp "$SCRIPT_FILE" "${SCRIPT_FILE}.backup"
+echo "✓ Created backup: ${SCRIPT_FILE}.backup"
+
+# The script will require MANIFEST_PATH, preventing streaming mode
+cat > "$SCRIPT_FILE.tmp" << 'PYTHON_SCRIPT'
 """
 AWS Glue Batch Job: NDJSON to Parquet Converter (Batch-Only Mode)
 ===================================================================
@@ -246,3 +273,21 @@ def main():
 
 if __name__ == "__main__":
     main()
+PYTHON_SCRIPT
+
+mv "$SCRIPT_FILE.tmp" "$SCRIPT_FILE"
+
+echo -e "${GREEN}✓ Script converted to batch-only mode${NC}"
+echo ""
+echo "Changes made:"
+echo "  - Removed streaming functionality (_process_manifest_directory)"
+echo "  - Made --MANIFEST_PATH required (prevents accidental streaming)"
+echo "  - Kept all batch processing logic"
+echo "  - Reduced code complexity"
+echo ""
+echo "To restore original: mv ${SCRIPT_FILE}.backup ${SCRIPT_FILE}"
+echo ""
+echo "Next steps:"
+echo "  1. Upload updated script: ./update-glue-job.sh"
+echo "  2. Test with specific manifest file"
+echo ""

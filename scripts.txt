@@ -1,3 +1,124 @@
+
+
+
+ CRITICAL: Current Architecture Won't Scale
+
+
+Next Steps for Production:
+Increase batch size (currently 0.001 GB is too small):
+
+# Create a script to set production batch size
+# Edit set-small-batch-size.sh and change 0.001 to 1.0
+Set up Athena to query the Parquet files:
+
+CREATE EXTERNAL TABLE IF NOT EXISTS parquet_data (
+  -- Add your schema columns here based on NDJSON structure
+  id STRING,
+  timestamp STRING,
+  -- etc...
+  _processing_timestamp TIMESTAMP,
+  _source_file STRING
+)
+PARTITIONED BY (date_prefix STRING)
+STORED AS PARQUET
+LOCATION 's3://ndjson-parquet-output-804450520964/merged-parquet-'
+TBLPROPERTIES ('parquet.compress'='SNAPPY');
+
+-- Add partitions
+MSCK REPAIR TABLE parquet_data;
+Monitor costs:
+Lambda: Minimal cost (only runs on file uploads)
+Glue: ~$0.88/hour with 2 workers (only when job runs)
+S3: Storage costs for input/output/manifests
+Would you like me to help you set up Athena to query these Parquet files, or create a summary document of the final working configuration?
+
+
+
+
+
+
+chmod +x purge-sqs-and-restart.sh
+./purge-sqs-and-restart.sh
+
+
+
+
+
+# Pick the newest manifest from the list
+aws s3 cp s3://ndjson-manifests-804450520964/manifests/2025-12-23/batch-0001-20251223-060225.json ./manifest.json
+cat manifest.json
+
+manifests/2025-12-23/batch-0001-20251223-060225.json
+
+aws s3 ls s3://ndjson-manifests-804450520964/manifests/ --recursive
+# Pick one manifest path from the output
+aws s3 cp s3://ndjson-manifests-804450520964/manifests/2025-12-23/batch-0001-20251223-060225.json ./manifest.json
+cat manifest.json
+
+aws s3 cp s3://ndjson-manifests-804450520964/manifests/2025-12-23/batch-0001-20251223-060225.json ./manifest.json
+cat manifest.json
+
+ manifests/2025-12-23/batch-0001-20251223-060225.json
+
+
+2025-12-25-test0043-145602-7fefee7a-e00f-11f0-b666-017df5fe9e9d.ndjson
+2025-12-23 09:56:12    3670952 2025-12-25-test0044-145606-82a77117-e00f-11f0-b65c-017df5fe9e9d.ndjson
+2025-12-23 09:56:16    3670334 2025-12-25-test0045-145611-8559805e-e00f-11f0-94ed-017df5fe9e9d.ndjson
+
+
+
+
+Summary: Complete Testing Workflow
+Here's the correct workflow to test your pipeline without spending $350:
+
+cd ingestion-pipeline
+
+# 1. FIRST: Optimize costs (reduce workers, stop any running jobs)
+chmod +x optimize-glue-cost.sh
+./optimize-glue-cost.sh
+
+# 2. Upload small test data
+chmod +x upload-test-data.sh
+./upload-test-data.sh
+
+# 3. Wait 1-2 minutes for Lambda to create manifests
+
+# 4. Run Glue job with specific manifest (batch mode)
+chmod +x run-glue-batch.sh
+./run-glue-batch.sh
+
+# 5. When done testing for the day
+./stop-all-glue-jobs.sh
+Why You Got the Error:
+The error --MANIFEST_PATH is required happens because:
+You clicked "Run job" in the AWS Glue console
+The console doesn't provide the --MANIFEST_PATH parameter by default
+Your script requires it (which prevents accidental streaming mode)
+Two Ways to Run the Job:
+❌ DON'T: Click "Run job" in AWS console (causes the error you saw) ✅ DO: Use the run-glue-batch.sh script which provides the required --MANIFEST_PATH parameter This approach:
+Only processes ONE manifest file
+Exits when done (not continuous)
+Costs ~$1-2 per run instead of $4.40/hour continuously
+Safe for testing on personal AWS account
+Would you like me to help you upload test data and run your first batch job?
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # First, delete the failed stack
 aws cloudformation delete-stack --stack-name ndjson-parquet-sqs
 
@@ -80,6 +201,12 @@ aws sqs delete-queue --queue-url https://sqs.us-east-1.amazonaws.com/80445052096
 aws dynamodb delete-table --table-name ndjson-parquet-sqs-file-tracking --region us-east-1
 
 
+aws cloudformation create-stack \
+  --stack-name ndjson-parquet-sqs \
+  --template-body file://cloudformation-sqs-manifest.yaml \
+  --parameters file://parameters.json \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --tags Key=Environment,Value=Production Key=Team,Value=DataEngineering
 
 # Create deployment package
 cd lambda/
