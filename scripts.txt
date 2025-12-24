@@ -2,7 +2,7 @@
 
 
  CRITICAL: Current Architecture Won't Scale
-mou
+
 
 Next Steps for Production:
 Increase batch size (currently 0.001 GB is too small):
@@ -201,6 +201,12 @@ aws sqs delete-queue --queue-url https://sqs.us-east-1.amazonaws.com/80445052096
 aws dynamodb delete-table --table-name ndjson-parquet-sqs-file-tracking --region us-east-1
 
 
+aws cloudformation create-stack \
+  --stack-name ndjson-parquet-sqs \
+  --template-body file://cloudformation-sqs-manifest.yaml \
+  --parameters file://parameters.json \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --tags Key=Environment,Value=Production Key=Team,Value=DataEngineering
 
 # Create deployment package
 cd lambda/
